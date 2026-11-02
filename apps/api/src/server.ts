@@ -17,6 +17,14 @@ import {
   type HighDetailizationData,
 } from '../../../packages/market-data/src/high-detailization.js';
 import { BinanceFuturesHistoricalProvider } from '../../../packages/market-data/src/binance-futures-historical-provider.js';
+import { HyperliquidApiProvider } from '../../../packages/market-data/src/hyperliquid-api-provider.js';
+import { MinuteHistoryProvider } from '../../../packages/market-data/src/minute-history-provider.js';
+import { OxArchiveHyperliquidProvider } from '../../../packages/market-data/src/oxarchive-hyperliquid-provider.js';
+import {
+  HYPERLIQUID_SYMBOL,
+  hyperliquidHistorySource,
+  OXARCHIVE_FULL_ARCHIVE_FROM,
+} from '../../../packages/shared/src/hyperliquid-history.js';
 import { assertHighRunConfiguration, HighSafetyError } from '../../../packages/pine-runtime/src/high-safety.js';
 import {
   BACKTEST_TIMEFRAME_MS,
@@ -63,6 +71,7 @@ import { isCrossOriginPaperWrite, registerPaperRoutes } from './paper-routes.js'
 import { registerLiveRoutes } from './live-routes.js';
 import { LiveSettingsStore } from './live-settings.js';
 import { ReportSettingsStore, registerReportRoutes } from './report-sharing.js';
+import { DataSourceSettingsStore, registerDataSourceRoutes } from './data-source-settings.js';
 import {
   DEFAULT_ENGINE_URL, ENGINE_TOKEN_HEADER, engineStatus, engineTokenMatches, readEngineToken, registerEngineProxy,
   type EngineConnection,
@@ -111,7 +120,16 @@ function appRole(value: string | undefined): AppRole {
 }
 
 export interface BuildAppOptions {
+  /** Tests: one history source for every exchange. Without it Binance and Hyperliquid use their own sources. */
   historicalProvider?: HistoricalMarketDataProvider;
+  /** Hyperliquid's own candles, contracts and market list (tests pass a fake). */
+  hyperliquidApi?: HistoricalMarketDataProvider & Pick<HyperliquidApiProvider, 'listMarkets'>;
+  /** Builds the 0xArchive source from the saved key (tests pass a fake). */
+  oxarchiveProvider?: (apiKey: string) => HistoricalMarketDataProvider;
+  /** Talks to 0xArchive when a key is saved (tests pass a fake). */
+  oxarchiveFetch?: typeof fetch;
+  /** Where the history sources' keys are kept (default: `data-source-secrets` next to the library). */
+  dataSourceSecretsDir?: string;
   binanceMarketList?: BinanceFuturesMarketListService;
   now?: () => number;
   maxExecutionMinutes?: number;
@@ -277,7 +295,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
     if (!engineTokenFile) throw new Error('The site needs PSR_ENGINE_TOKEN_FILE to reach the Paper engine.');
     return { url: process.env.PSR_ENGINE_URL || DEFAULT_ENGINE_URL, token: readEngineToken(engineTokenFile) };
   })();
-  const historicalProvider = options.historicalProvider ?? defaultHistoricalProvider();
+  const binanceHistory = options.historicalProvider ?? defaultHistoricalProvider();
+  const hyperliquidApi: HistoricalMarketDataProvider & Pick<HyperliquidApiProvider, 'listMarkets'> = options.hyperliquidApi ?? new HyperliquidApiProvider();
+  const oxarchiveProvider = options.oxarchiveProvider ?? ((apiKey: string) => new OxArchiveHyperliquidProvider({ apiKey }));
   const binanceMarketList = options.binanceMarketList ?? new BinanceFuturesMarketListService();
   const now = options.now ?? Date.now;
   const strategyCatalogDir = options.strategyCatalogDir === null
@@ -291,6 +311,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
     strategyCatalog ??= new StrategyCatalogV1(strategyCatalogDir, now);
     return strategyCatalog;
   };
+  const dataSources = new DataSourceSettingsStore(options.dataSourceSecretsDir ?? process.env.PSR_DATA_SOURCE_SECRETS_DIR
+    ?? (strategyCatalogDir ? path.join(path.dirname(strategyCatalogDir), 'data-source-secrets') : path.join(projectRoot, '.local', 'data-source-secrets')));
   const paperExperimentsDir = options.paperExperimentsDir === null
     ? null
     : options.paperExperimentsDir
@@ -418,6 +440,23 @@ export async function buildApp(options: BuildAppOptions = {}) {
         maxExecutionMinutes,
       },
     };
+  });
+
+  registerDataSourceRoutes(app, { store: dataSources, fetcher: options.oxarchiveFetch, now });
+
+  app.get('/api/markets/hyperliquid', async (_request, reply) => {
+    try {
+      reply.header('Cache-Control', 'no-store');
+      return await hyperliquidApi.listMarkets();
+    } catch {
+      return reply.code(503).send({
+        kind: 'HYPERLIQUID_MARKET_LIST_UNAVAILABLE',
+        error: bilingualMessage(
+          'The Hyperliquid market list is unavailable. Try again shortly.',
+          'Список рынков Hyperliquid недоступен. Повторите попытку позже.',
+        ),
+      });
+    }
   });
 
   app.get('/api/markets/binance-futures', async (_request, reply) => {
@@ -622,17 +661,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
       });
     }
 
-    if (options.historicalProvider === undefined && parsed.data.exchange !== 'Binance') {
+    // Hyperliquid names keep their case (kPEPE, xyz:SP500).
+    const symbol = parsed.data.exchange === 'Binance' ? parsed.data.symbol.trim().toUpperCase() : parsed.data.symbol.trim();
+    if (parsed.data.exchange === 'Hyperliquid' && options.historicalProvider === undefined && !HYPERLIQUID_SYMBOL.test(symbol)) {
       return reply.code(422).send({
         error: bilingualMessage(
-          'This service runs backtests only on public Binance Futures history.',
-          'Этот сервис выполняет бэктест только на публичной истории Binance Futures.',
+          `Choose a Hyperliquid market from the list (for example BTC or xyz:SP500); ${symbol} is not one.`,
+          `Выберите рынок Hyperliquid из списка (например, BTC или xyz:SP500); ${symbol} — не рынок Hyperliquid.`,
         ),
         kind: 'UNSUPPORTED_HISTORICAL_VENUE',
       });
     }
-
-    const symbol = parsed.data.symbol.trim().toUpperCase();
     if (parsed.data.barDetailization === 'high') {
       try {
         assertHighRunConfiguration({
@@ -729,6 +768,32 @@ export async function buildApp(options: BuildAppOptions = {}) {
         },
       });
     }
+
+    // Each run reads one source. Hyperliquid: 0xArchive inside the key's plan window (every timeframe built from its
+    // minutes), otherwise Hyperliquid's own candles; the dates allowed are the form's (hyperliquid-history.ts).
+    let historicalProvider: HistoricalMarketDataProvider = binanceHistory;
+    if (parsed.data.exchange === 'Hyperliquid' && options.historicalProvider === undefined) {
+      const detail = parsed.data.barDetailization === 'high' ? 'high' : 'default';
+      const access = dataSources.access();
+      const plan = hyperliquidHistorySource(parsed.data.dateRange.start, parsed.data.timeframe, detail, access, requestNow);
+      if ('error' in plan) {
+        finished = true;
+        return reply.code(422).send({ error: bilingualMessage(plan.error.en, plan.error.ru), kind: 'HYPERLIQUID_HISTORY_WINDOW' });
+      }
+      const apiKey = dataSources.oxarchiveKey();
+      if (plan.source === 'oxarchive' && apiKey) {
+        historicalProvider = new MinuteHistoryProvider(oxarchiveProvider(apiKey), hyperliquidApi, {
+          notBefore: access.historyDays === null
+            ? Date.parse(`${OXARCHIVE_FULL_ARCHIVE_FROM}T00:00:00.000Z`)
+            : requestNow - access.historyDays * DAY_MS + 5 * MINUTE_MS,
+        });
+      } else if (detail === 'high' && parsed.data.timeframe !== '1m') {
+        historicalProvider = new MinuteHistoryProvider(hyperliquidApi, hyperliquidApi, { lookbackMs: 0 });
+      } else {
+        historicalProvider = hyperliquidApi;
+      }
+    }
+    const venueName = parsed.data.exchange === 'Binance' ? 'Binance Futures' : 'Hyperliquid';
 
     let parentResult: HistoricalMarketDataResult;
     let instrument: Awaited<ReturnType<HistoricalMarketDataProvider['getInstrument']>>;
@@ -953,8 +1018,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
         const candles = aggregateCandles(loaded.candles, request.timeframeMs, plan.factor);
         assertCompleteSeries(candles, window, request.timeframeMs);
         seriesNotes.push(bilingualMessage(
-          `request.security: ${candles.length} closed ${request.timeframe} candles of Binance Futures ${symbol}${plan.factor > 1 ? `, built from ${plan.interval}` : ''}, ${new Date(window.startInclusive).toISOString().slice(0, 10)} to ${new Date(window.endExclusive).toISOString().slice(0, 10)}.`,
-          `request.security: ${candles.length} закрытых свечей ${request.timeframe} Binance Futures ${symbol}${plan.factor > 1 ? `, собранных из ${plan.interval}` : ''}, с ${new Date(window.startInclusive).toISOString().slice(0, 10)} по ${new Date(window.endExclusive).toISOString().slice(0, 10)}.`,
+          `request.security: ${candles.length} closed ${request.timeframe} candles of ${venueName} ${symbol}${plan.factor > 1 ? `, built from ${plan.interval}` : ''}, ${new Date(window.startInclusive).toISOString().slice(0, 10)} to ${new Date(window.endExclusive).toISOString().slice(0, 10)}.`,
+          `request.security: ${candles.length} закрытых свечей ${request.timeframe} ${venueName} ${symbol}${plan.factor > 1 ? `, собранных из ${plan.interval}` : ''}, с ${new Date(window.startInclusive).toISOString().slice(0, 10)} по ${new Date(window.endExclusive).toISOString().slice(0, 10)}.`,
         ));
         // A higher-timeframe bar still open at the chart's end is built from the chart's
         // own candles only, so no later price reaches the script.
@@ -1007,7 +1072,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         intrabar: highDetailization && minuteResult ? {
           source: parsed.data.exchange === 'Binance'
             ? 'Binance Futures candles'
-            : '0xArchive Hyperliquid candles',
+            : minuteResult.provenance.provider === 'Hyperliquid' ? 'Hyperliquid candles' : '0xArchive Hyperliquid candles',
           sourceTimeframe: '1m',
           replayTimeframe: '1m',
           bars1m: highDetailization.metadata.source.rows,

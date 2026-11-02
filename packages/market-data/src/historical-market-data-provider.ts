@@ -44,7 +44,7 @@ export interface HistoricalCandleRecoveryProvenance {
 export interface HistoricalMarketDataResult {
   candles: Candle[];
   provenance: {
-    provider: '0xArchive' | 'Binance Futures';
+    provider: '0xArchive' | 'Binance Futures' | 'Hyperliquid';
     venue: 'hyperliquid' | 'binance';
     symbol: string;
     interval: BacktestTimeframe;
@@ -68,7 +68,7 @@ export interface HistoricalInstrumentResult {
   isActive: boolean;
   instrumentType: 'perp' | 'spot' | null;
   provenance: {
-    provider: '0xArchive' | 'Binance Futures';
+    provider: '0xArchive' | 'Binance Futures' | 'Hyperliquid';
     venue: 'hyperliquid' | 'binance';
     requestId: string | null;
     fetchedAt: string;

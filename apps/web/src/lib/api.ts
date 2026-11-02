@@ -2,6 +2,7 @@ import type {
   BacktestRequest, BacktestResponse, PineCheckRequest, PineCheckResponse, PresetResponse,
 } from '../../../../packages/shared/src/contracts';
 import type { BinanceFuturesMarketList } from '../../../../packages/shared/src/binance-market-list-contracts';
+import type { DataSourcesView, HyperliquidMarketList } from '../../../../packages/shared/src/hyperliquid-history';
 import type { ExchangeLoadView } from '../../../../packages/shared/src/exchange-load';
 import type {
   CreateStrategyInput,
@@ -70,6 +71,25 @@ export async function loadPreset(): Promise<PresetResponse> {
 
 export async function loadBinanceFuturesMarkets(signal?: AbortSignal): Promise<BinanceFuturesMarketList> {
   return parse<BinanceFuturesMarketList>(await apiFetch('/api/markets/binance-futures', { signal }));
+}
+
+export async function loadHyperliquidMarkets(signal?: AbortSignal): Promise<HyperliquidMarketList> {
+  return parse<HyperliquidMarketList>(await apiFetch('/api/markets/hyperliquid', { signal }));
+}
+
+export async function loadDataSources(): Promise<DataSourcesView> {
+  return parse<DataSourcesView>(await apiFetch('/api/data-sources'));
+}
+
+/** The key goes to this server only; the answer says whether it is saved and how much history its plan includes. */
+export async function saveOxArchiveKey(apiKey: string): Promise<DataSourcesView> {
+  return parse<DataSourcesView>(await apiFetch('/api/data-sources/oxarchive', {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiKey }),
+  }));
+}
+
+export async function removeOxArchiveKey(): Promise<DataSourcesView> {
+  return parse<DataSourcesView>(await apiFetch('/api/data-sources/oxarchive', { method: 'DELETE' }));
 }
 
 export async function runBacktest(request: BacktestRequest, signal: AbortSignal): Promise<BacktestResponse> {

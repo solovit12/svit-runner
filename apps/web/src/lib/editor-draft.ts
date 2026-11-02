@@ -13,6 +13,8 @@ const PAPER_KEY = 'psr.paperDraft.v1';
 
 const EditorDraftSchema = z.object({
   source: z.string(),
+  /** Drafts saved before Hyperliquid backtests were Binance ones. */
+  exchange: z.enum(['Binance', 'Hyperliquid']).optional(),
   symbol: z.string(),
   timeframe: BacktestTimeframeSchema,
   startDate: z.string(),

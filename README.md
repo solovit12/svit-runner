@@ -47,7 +47,7 @@ Pine strategy ──► Backtest ──► Paper ──► LIVE
 
 | | What you get | Money |
 |---|---|---|
-| **Backtest** | Your Pine strategy on Binance USDⓈ-M perpetual futures history, with stops, take-profits and limits checked on every minute inside each bar. Chart with trade markers, metrics and every trade. | none |
+| **Backtest** | Your Pine strategy on Binance USDⓈ-M perpetual futures history or on Hyperliquid (including its stock, index and commodity markets such as `xyz:SP500`), with stops, take-profits and limits checked on every minute inside each bar. Chart with trade markers, metrics and every trade. | none |
 | **Paper** | The same strategy running in real time on the live order books of Lighter and Hyperliquid (including Hyperliquid's stock, index and commodity markets such as `xyz:NVDA`), up to 15 markets per exchange. Orders fill against the real book with each exchange's fees and a realistic delay. | virtual balance |
 | **LIVE** | The same strategy placing real orders on your own Lighter and/or Hyperliquid account, with a daily loss limit, an account leverage limit, a stop resting on the exchange and a Stop button that closes everything. | your real money |
 | **Python strategies** | Your own Python classes for logic Pine cannot express: they react to every price change in Paper and LIVE (not in Backtest). | — |
@@ -73,8 +73,8 @@ Runs on Windows, macOS and Linux with Docker Desktop (or Docker Engine on Linux)
 - **The Pine engine** is [PineTS](https://github.com/LuxAlgo/PineTS) (a pinned, patched copy in
   `vendor/pinets`). It is an independent implementation of Pine, not TradingView itself — see
   [what to expect](#what-to-expect).
-- **Backtest** loads public Binance USDⓈ-M futures candles (no Binance account or key) and replays
-  your orders on minute candles.
+- **Backtest** loads public Binance USDⓈ-M futures candles (no Binance account or key) or Hyperliquid
+  candles (see [Hyperliquid history](#hyperliquid-history)) and replays your orders on minute candles.
 - **Paper and LIVE** run your strategy on each closed candle of the exchange it trades, and hand its
   orders to [Nautilus Trader](https://nautilustrader.io), which executes them in real time: against a
   virtual account in Paper, against your account in LIVE. Paper uses public market data only and
@@ -159,7 +159,7 @@ rules and costs?* It does not predict future profit.
 
 | Field | Meaning |
 |---|---|
-| Market | A Binance USDⓈ-M perpetual (for example `BTCUSDT`; compare on TradingView with `BINANCE:BTCUSDT.P`). |
+| Exchange, market | Binance Futures: a USDⓈ-M perpetual (for example `BTCUSDT`; compare on TradingView with `BINANCE:BTCUSDT.P`). Hyperliquid: a main perpetual (`BTC`, `HYPE`) or an XYZ market (`xyz:SP500`, `xyz:NVDA`), settled in USDC. |
 | Timeframe | `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`. The strategy calculates on closed bars of this timeframe. |
 | From / To | UTC dates. *From* starts at 00:00 UTC, *To* is included whole. No hidden warm-up: an SMA of 200 has no full value on the first 199 bars. |
 | Initial capital, order size, pyramiding | Override the values in `strategy(...)`, like TradingView's *Properties* tab. Order size: fixed quantity, cash amount or percent of equity. |
@@ -178,6 +178,24 @@ of every trade.
 because orders are always checked minute by minute.
 
 **Gaps:** a gap in Binance data stops the backtest with a message instead of being filled in.
+
+### Hyperliquid history
+
+Hyperliquid keeps only its most recent 5,000 candles of each timeframe, so how far back a Hyperliquid
+backtest can start depends on the timeframe and the bar detail; the form shows the earliest date and
+refuses earlier ones:
+
+| | 4 points per bar | Every minute |
+|---|---|---|
+| Without a key | 5,000 candles of the timeframe (15m ≈ 52 days, 1h ≈ 208 days) | about the last 3.5 days (Hyperliquid's 1-minute candles) |
+| With a free [0xArchive](https://www.0xarchive.io) API key | the same, or the key's window if longer | the key's window: the last 30 days on the free plan, more on paid plans |
+
+Paste the key in the *Hyperliquid history* box under the backtest settings. It is checked with two small
+requests and stays on your server (a folder only the server's user can read); the page only sees that a
+key is saved. Inside the key's window every candle of a run comes from 0xArchive (each timeframe built
+from its minutes, quiet minutes without trades carried at the last price after checking 0xArchive's
+trades); earlier runs use Hyperliquid's own candles. One run never mixes the two. On a server you can
+give the key in a file instead: `OXARCHIVE_API_KEY_FILE` (plan window `OXARCHIVE_HISTORY_DAYS`, default 30).
 
 More: [TradingView compatibility](docs/tradingview-compatibility.md) (what is supported, what is
 not), [strategy properties](docs/strategy-properties.md) (each setting explained, in Russian).
@@ -499,9 +517,9 @@ LIVE runs your strategy with **real orders on your own account**. It is off unti
   other timeframes. The full list: [TradingView compatibility](docs/tradingview-compatibility.md).
   Reference strategies match TradingView exports trade for trade with *4 points per bar*; that shows
   the engine is close on those cases, not identical for every script.
-- **Backtest data is Binance.** Its prices and history differ from Lighter's and Hyperliquid's. Binance
-  blocks some countries (for example the United States); there the Backtest tab cannot load candles.
-  Paper and LIVE use Lighter and Hyperliquid and are not affected.
+- **Backtest data is Binance or Hyperliquid.** Binance prices and history differ from Lighter's and
+  Hyperliquid's. Binance blocks some countries (for example the United States); there choose Hyperliquid.
+  Hyperliquid history is short (see [Hyperliquid history](#hyperliquid-history)). Funding is not included.
 - **Paper is a simulation.** Prices, depth and timing are real; your orders are not. Real fills can
   differ (queue position, latency, other traders reacting). Funding is not included.
 - **LIVE is real.** Fills, fees and slippage are the exchange's; the run page shows them as they
@@ -633,7 +651,7 @@ published as `ghcr.io/solovit12/svit-runner`.
 | `apps/api/src/paper-execution` | Run control, the Nautilus process owner, the durable run journal. |
 | `apps/nautilus-paper` | Python execution engine on Nautilus Trader (Paper and LIVE), its tests and the pinned build recipe. |
 | `packages/pine-runtime` | Pine normalization, TradingView defaults, minute-replay order execution, the live Pine engine. |
-| `packages/market-data` | Binance Futures history and minute replay. |
+| `packages/market-data` | Binance Futures and Hyperliquid (with 0xArchive) history, minute replay. |
 | `packages/shared` | Contracts shared by the server and the UI, exact decimal arithmetic. |
 | `vendor/pinets` | Pinned PineTS with local changes (do not replace it from npm). |
 | `tests`, `tests/fixtures/qualification` | The test suite; reference strategies and TradingView exports. |

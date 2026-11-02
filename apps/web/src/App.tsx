@@ -5,6 +5,8 @@ import { DEFAULT_SLIPPAGE_PERCENT, PINETS_VERSION, type BacktestRequest, type Ba
 import { PYTHON_STRATEGY_SOURCE_PREFIX, pythonStrategyRef, type PaperStrategySettings, type StrategyDetail, type StrategySummary } from '../../../packages/shared/src/strategy-catalog-contracts';
 import { BacktestReports } from './components/BacktestReports';
 import { BinanceMarketSelector } from './components/BinanceMarketSelector';
+import { HyperliquidHistoryPanel } from './components/HyperliquidHistoryPanel';
+import { HyperliquidMarketSelector } from './components/HyperliquidMarketSelector';
 import { Metrics } from './components/Metrics';
 import { LiveAccountsPage } from './components/LiveSettings';
 import { PaperRunsPreview, PaperSetupPreview, type PaperVersionRequest } from './components/PaperScreens';
@@ -15,9 +17,10 @@ import { StrategyLibraryBrowser } from './components/StrategyLibraryBrowser';
 import { InfoTooltip } from './components/TranslatedText';
 import { TradesTable } from './components/TradesTable';
 import {
-  createStrategy, deleteStrategy, listPaperExperiments, listStrategies, loadPreset, loadServerHealth, loadStrategy, loadStrategyCatalogCapabilities,
+  createStrategy, deleteStrategy, listPaperExperiments, listStrategies, loadDataSources, loadPreset, loadServerHealth, loadStrategy, loadStrategyCatalogCapabilities,
   runBacktest, saveStrategyVersion, type ServerHealth,
 } from './lib/api';
+import { HYPERLIQUID_SYMBOL, hyperliquidHistorySource, hyperliquidHistoryWindow, type DataSourcesView } from '../../../packages/shared/src/hyperliquid-history';
 import { backtestDateWindowError, inclusiveUtcDays } from './lib/backtest-date-window';
 import { readEditorDraft, writeEditorDraft, type EditorDraft } from './lib/editor-draft';
 import { validSourceUrl } from './lib/backtest-report';
@@ -29,6 +32,8 @@ import { findSavedPythonStrategy, pythonStrategySource } from './lib/python-stra
 import { changedDeclarationProperties, strategyDeclarationProperties, type StrategyDeclarationProperties } from './strategy-declaration';
 
 type RunState = 'loading-preset' | 'ready' | 'running' | 'success' | 'error' | 'stopped';
+type BacktestExchange = BacktestRequest['exchange'];
+const NO_OXARCHIVE = { configured: false, historyDays: null };
 type AppPage = 'backtest' | 'paper-setup' | 'paper-runs' | 'accounts';
 
 /** Header status: busy Paper slots still mean Paper works; a site without its engine says so. */
@@ -42,6 +47,7 @@ export function paperModeLabel(health: ServerHealth): string {
 }
 type EditorSnapshot = {
   source: string;
+  exchange: BacktestExchange;
   symbol: string;
   timeframe: BacktestTimeframe;
   startDate: string;
@@ -182,7 +188,9 @@ export function App() {
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [preset, setPreset] = useState<PresetResponse | null>(null);
   const [source, setSource] = useState('');
+  const [exchange, setExchange] = useState<BacktestExchange>('Binance');
   const [symbol, setSymbol] = useState('BTCUSDT');
+  const [dataSources, setDataSources] = useState<DataSourcesView | null>(null);
   const [timeframe, setTimeframe] = useState<BacktestTimeframe>('1h');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -251,16 +259,18 @@ export function App() {
     });
   }, []);
 
+  useEffect(() => { loadDataSources().then(setDataSources).catch(() => undefined); }, []);
+
   // Unsaved work survives a page reload (this browser only).
   useEffect(() => {
     if (!draftRestored.current) return;
     const timer = window.setTimeout(() => writeEditorDraft({
-      source, symbol, timeframe, startDate, endDate, initialCapital, defaultOrderSizeValue, defaultOrderSizeType,
+      source, exchange, symbol, timeframe, startDate, endDate, initialCapital, defaultOrderSizeValue, defaultOrderSizeType,
       pyramiding, commissionValueInput, longLeverage, shortLeverage, slippagePercent, processOrdersOnClose, barDetail, strategyName,
       strategyId: loadedStrategy?.strategy.id ?? null,
     }), 300);
     return () => window.clearTimeout(timer);
-  }, [source, symbol, timeframe, startDate, endDate, initialCapital, defaultOrderSizeValue, defaultOrderSizeType, pyramiding,
+  }, [source, exchange, symbol, timeframe, startDate, endDate, initialCapital, defaultOrderSizeValue, defaultOrderSizeType, pyramiding,
     commissionValueInput, longLeverage, shortLeverage, slippagePercent, processOrdersOnClose, barDetail, strategyName, loadedStrategy, state]);
 
   useEffect(() => {
@@ -357,15 +367,22 @@ export function App() {
     const marginShortPercent = leverageToMarginPercent(shortLeverage, { en: 'Short leverage', ru: 'Плечо для шорта' });
     const barDetailization: BarDetail = timeframe === '1m' ? 'default' : barDetail;
     const dateWindowError = backtestDateWindowError(startDate, endDate);
+    const hyperliquidPlan = exchange === 'Hyperliquid'
+      ? hyperliquidHistorySource(startDate, timeframe, barDetailization, dataSources?.oxarchive ?? NO_OXARCHIVE, Date.now())
+      : null;
     const normalizedCommission = commissionValueInput.trim() === '' && commissionFallback !== undefined
       ? String(commissionFallback) : commissionValueInput.trim().replace(',', '.');
     const commissionValue = Number(normalizedCommission);
     const validationError = !source.trim()
       ? bilingual('The Pine editor is empty.', 'Редактор Pine пуст.')
-      : !/^[A-Z0-9]+USDT$/.test(symbol.trim())
+      : exchange === 'Binance' && !/^[A-Z0-9]+USDT$/.test(symbol.trim())
         ? bilingual('Enter a Binance perpetual symbol settled in USDT, for example BTCUSDT.', 'Укажите символ бессрочного контракта Binance с расчётом в USDT, например BTCUSDT.')
+      : exchange === 'Hyperliquid' && !HYPERLIQUID_SYMBOL.test(symbol.trim())
+        ? bilingual('Choose a Hyperliquid market from the list, for example BTC or xyz:SP500.', 'Выберите рынок Hyperliquid из списка, например BTC или xyz:SP500.')
       : dateWindowError
         ? dateWindowError
+      : hyperliquidPlan && 'error' in hyperliquidPlan
+        ? bilingual(hyperliquidPlan.error.en, hyperliquidPlan.error.ru)
         : !Number.isFinite(initialCapital) || initialCapital <= 0
           ? bilingual('Initial capital must be greater than zero.', 'Начальный капитал должен быть больше нуля.')
           : !Number.isFinite(defaultOrderSizeValue) || defaultOrderSizeValue <= 0
@@ -381,16 +398,32 @@ export function App() {
       throw new Error(validationError);
     }
     return {
-      source, exchange: 'Binance', marketType: 'Perpetual', symbol: symbol.trim().toUpperCase(), timeframe,
+      source, exchange, marketType: 'Perpetual', symbol: exchange === 'Binance' ? symbol.trim().toUpperCase() : symbol.trim(), timeframe,
       barIndexOffset: 0,
       dateRange: { start: startDate, end: endDate },
-      initialCapital, baseCurrency: 'USDT', defaultOrderSizeValue, defaultOrderSizeType, pyramiding,
+      initialCapital, baseCurrency: exchange === 'Binance' ? 'USDT' : 'USDC', defaultOrderSizeValue, defaultOrderSizeType, pyramiding,
       feeModel: 'manual',
       commissionType: 'percent', commissionValue, marginLongPercent, marginShortPercent, slippagePercent,
       barDetailization, calcOnOrderFills: false, calcOnEveryTick: false,
       calcOnEveryHistoryTick: false, limitOrderVerificationTicks: 0, processOrdersOnClose,
     };
   };
+
+  /** Another exchange keeps the coin when it can (BTCUSDT ↔ BTC) and moves the start into Hyperliquid's history. */
+  const changeExchange = (next: BacktestExchange) => {
+    if (next === exchange) return;
+    setExchange(next);
+    setSymbol(next === 'Hyperliquid'
+      ? (/^([A-Z0-9]+)USDT$/.exec(symbol.trim())?.[1] ?? 'BTC')
+      : (/^[A-Z0-9]+$/.test(symbol.trim()) ? `${symbol.trim()}USDT` : 'BTCUSDT'));
+    if (next === 'Hyperliquid') {
+      const detail = timeframe === '1m' ? 'default' : barDetail;
+      const { earliestStart } = hyperliquidHistoryWindow(timeframe, detail, dataSources?.oxarchive ?? NO_OXARCHIVE, Date.now());
+      if (startDate < earliestStart) setStartDate(earliestStart);
+      if (endDate < earliestStart) setEndDate(new Date().toISOString().slice(0, 10));
+    }
+  };
+  const quoteCurrency = exchange === 'Binance' ? 'USDT' : 'USDC';
 
   const backtestMatchesEditor = (): boolean => {
     if (state !== 'success' || result === null || lastBacktestedRequest === null) return false;
@@ -458,6 +491,7 @@ export function App() {
     setSelectedStrategyId(detail.strategy.id);
     setStrategyName(detail.version.name);
     setLoadedSource(detail.version.source);
+    setExchange(settings.exchange);
     setSymbol(settings.symbol);
     setTimeframe(settings.timeframe);
     setStartDate(settings.dateRange.start);
@@ -481,6 +515,7 @@ export function App() {
   /** Puts the draft saved before a reload back into the form, over the template. */
   const restoreEditorDraft = (draft: EditorDraft, templateSource: string) => {
     setLoadedSource(draft.source);
+    setExchange(draft.exchange ?? 'Binance');
     setSymbol(draft.symbol);
     setTimeframe(timeframeOptions.includes(draft.timeframe) ? draft.timeframe : '1h');
     setStartDate(draft.startDate);
@@ -513,6 +548,7 @@ export function App() {
     const previousEditor = previousEditors.at(-1);
     if (!previousEditor) return;
     setLoadedSource(previousEditor.source);
+    setExchange(previousEditor.exchange);
     setSymbol(previousEditor.symbol);
     setTimeframe(previousEditor.timeframe);
     setStartDate(previousEditor.startDate);
@@ -569,7 +605,7 @@ export function App() {
   /** Keeps the editor as it is now, so Undo can bring it back (the last three). */
   const rememberEditor = () => {
     const snapshot: EditorSnapshot = {
-      source, symbol, timeframe, startDate, endDate, initialCapital,
+      source, exchange, symbol, timeframe, startDate, endDate, initialCapital,
       defaultOrderSizeValue, defaultOrderSizeType, pyramiding, commissionValueInput,
       longLeverage, shortLeverage, slippagePercent, processOrdersOnClose, barDetail, strategyName, selectedStrategyId,
       loadedStrategy, paperStrategy, result, lastBacktestedRequest, state, error,
@@ -838,7 +874,7 @@ export function App() {
       </section>
 
       <div className="strategy-tabs" role="tablist" aria-label="Strategy mode">
-        <button type="button" role="tab" id="tab-backtest" aria-selected={page === 'backtest'} aria-controls="panel-backtest" className={page === 'backtest' ? 'active' : ''} onClick={() => navigate('backtest')}>Backtest<small>Binance history</small></button>
+        <button type="button" role="tab" id="tab-backtest" aria-selected={page === 'backtest'} aria-controls="panel-backtest" className={page === 'backtest' ? 'active' : ''} onClick={() => navigate('backtest')}>Backtest<small>Binance and Hyperliquid history</small></button>
         <button type="button" role="tab" id="tab-paper" aria-selected={page === 'paper-setup'} aria-controls="panel-paper" className={page === 'paper-setup' ? 'active' : ''} onClick={() => preparePaper(true)}>Paper<small>live prices, virtual money</small></button>
       </div>
 
@@ -849,11 +885,13 @@ export function App() {
       <div role="tabpanel" id="panel-backtest" aria-labelledby="tab-backtest" hidden={page !== 'backtest'}>
       <section className="control-deck">
         <div className="settings-grid">
-          <label><span>Exchange</span><input value="Binance Futures" readOnly /></label>
+          <label><span>Exchange</span><select value={exchange} onChange={(event) => changeExchange(event.target.value as BacktestExchange)} disabled={state === 'running'}><option value="Binance">Binance Futures</option><option value="Hyperliquid">Hyperliquid</option></select></label>
           <label><span>Market</span><input value="Perpetual" readOnly /></label>
-          <BinanceMarketSelector value={symbol} onChange={setSymbol} disabled={state === 'running'} />
+          {exchange === 'Binance'
+            ? <BinanceMarketSelector value={symbol} onChange={setSymbol} disabled={state === 'running'} />
+            : <HyperliquidMarketSelector value={symbol} onChange={setSymbol} disabled={state === 'running'} />}
           <label><span>Timeframe</span><select value={timeframe} onChange={(event) => setTimeframe(event.target.value as BacktestTimeframe)} disabled={state === 'running'}>{timeframeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-          <label><span>From · UTC</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} disabled={state === 'running'} /></label>
+          <label><span>From · UTC</span><input type="date" min={exchange === 'Hyperliquid' ? hyperliquidHistoryWindow(timeframe, timeframe === '1m' ? 'default' : barDetail, dataSources?.oxarchive ?? NO_OXARCHIVE, Date.now()).earliestStart : undefined} value={startDate} onChange={(event) => setStartDate(event.target.value)} disabled={state === 'running'} /></label>
           <label className="date-range-end"><span>To · UTC · inclusive <InfoTooltip label="date range" en={dateRangeCopy.en} ru={dateRangeCopy.ru} alignRight /></span><input type="date" max={new Date().toISOString().slice(0, 10)} value={endDate} onChange={(event) => setEndDate(event.target.value)} disabled={state === 'running'} /></label>
         </div>
         <div className="run-zone">
@@ -866,14 +904,17 @@ export function App() {
         </div>
       </section>
 
+      {exchange === 'Hyperliquid' && <HyperliquidHistoryPanel timeframe={timeframe} barDetail={timeframe === '1m' ? 'default' : barDetail}
+        dataSources={dataSources} onDataSources={setDataSources} disabled={state === 'running'} />}
+
       <details className="properties-panel" open>
         <summary><span><Settings2 size={15} />Strategy Properties</span><small>Execution model settings</small></summary>
         <div className="properties-content">
           <section className="property-group">
             <div className="property-heading"><span>General</span><strong>Capital and Order Size</strong></div>
             <div className="property-fields">
-              <label><span>Initial Capital <InfoTooltip label="initial capital" en="Starting balance of the strategy." ru="Стартовый баланс стратегии." /></span><div className="input-suffix"><input type="number" min="0.01" step="1000" value={initialCapital} onChange={(event) => setInitialCapital(Number(event.target.value))} disabled={state === 'running'} /><span>USDT</span></div></label>
-              <label><span>Default Order Size <InfoTooltip label="default order size" en="Choose coin quantity, USDT value, or a share of equity." ru="Выберите количество монет, сумму USDT или долю капитала." /></span><div className="compound-input"><input type="number" min="0.00000001" step="any" value={defaultOrderSizeValue} onChange={(event) => setDefaultOrderSizeValue(Number(event.target.value))} disabled={state === 'running'} /><select value={defaultOrderSizeType} onChange={(event) => setDefaultOrderSizeType(event.target.value as OrderSizeType)} disabled={state === 'running'}><option value="fixed">Quantity</option><option value="cash">USDT</option><option value="percent_of_equity">% of equity</option></select></div></label>
+              <label><span>Initial Capital <InfoTooltip label="initial capital" en="Starting balance of the strategy." ru="Стартовый баланс стратегии." /></span><div className="input-suffix"><input type="number" min="0.01" step="1000" value={initialCapital} onChange={(event) => setInitialCapital(Number(event.target.value))} disabled={state === 'running'} /><span>{quoteCurrency}</span></div></label>
+              <label><span>Default Order Size <InfoTooltip label="default order size" en="Choose coin quantity, USDT value, or a share of equity." ru="Выберите количество монет, сумму USDT или долю капитала." /></span><div className="compound-input"><input type="number" min="0.00000001" step="any" value={defaultOrderSizeValue} onChange={(event) => setDefaultOrderSizeValue(Number(event.target.value))} disabled={state === 'running'} /><select value={defaultOrderSizeType} onChange={(event) => setDefaultOrderSizeType(event.target.value as OrderSizeType)} disabled={state === 'running'}><option value="fixed">Quantity</option><option value="cash">{quoteCurrency}</option><option value="percent_of_equity">% of equity</option></select></div></label>
               <label><span>Pyramiding <InfoTooltip label="pyramiding" en="Maximum number of same-direction entries that may remain open." ru="Максимальное число одновременно открытых входов в одном направлении." /></span><input type="number" min="0" max="100" step="1" value={pyramiding} onChange={(event) => setPyramiding(Number(event.target.value))} disabled={state === 'running'} /></label>
             </div>
           </section>
@@ -924,7 +965,7 @@ export function App() {
 
       {error && <section className="error-banner"><AlertTriangle size={18} /><div><strong>Strategy Did Not Start</strong><p>{errorCopy.en}{errorCopy.ru && <> <InfoTooltip label="run error" en={errorCopy.en} ru={errorCopy.ru} /></>}</p></div></section>}
 
-      <Metrics metrics={result?.metrics || null} />
+      <Metrics metrics={result?.metrics || null} currency={result?.configuration.baseCurrency ?? quoteCurrency} />
       {reportSharingAvailable(EDITION) && state === 'success' && result && lastBacktestedRequest && <BacktestReports key={result.runId}
         result={result} request={lastBacktestedRequest} loadedStrategy={loadedStrategy} onStrategySaved={(detail) => {
           setLoadedStrategy(detail);
@@ -935,7 +976,9 @@ export function App() {
 
       <footer className="evidence-footer">
         <div><ShieldCheck size={15} /><span>Runtime <InfoTooltip label="runtime" en={runtimeCopy.en} ru={runtimeCopy.ru} /></span><strong>{result ? runtimeCopy.en : `PineTS ${PINETS_VERSION}`}</strong></div>
-        <p>Binance Futures data <InfoTooltip label="backtest limitations" alignRight en="Backtests use Binance Futures candles and the commission you enter. Prices and execution may differ on Hyperliquid and Lighter. Funding is not included in PnL, so live results may differ." ru="Бэктест использует свечи Binance Futures и введённую вами комиссию. На Hyperliquid и Lighter цены и исполнение могут отличаться. Фандинг не учитывается в PnL, поэтому реальный результат может быть другим." /></p>
+        {exchange === 'Binance'
+          ? <p>Binance Futures data <InfoTooltip label="backtest limitations" alignRight en="Backtests use Binance Futures candles and the commission you enter. Prices and execution may differ on Hyperliquid and Lighter. Funding is not included in PnL, so live results may differ." ru="Бэктест использует свечи Binance Futures и введённую вами комиссию. На Hyperliquid и Lighter цены и исполнение могут отличаться. Фандинг не учитывается в PnL, поэтому реальный результат может быть другим." /></p>
+          : <p>Hyperliquid data <InfoTooltip label="backtest limitations" alignRight en="Backtests use Hyperliquid candles (from 0xArchive inside your key's window) and the commission you enter. Funding is not included in PnL, so live results may differ." ru="Бэктест использует свечи Hyperliquid (внутри окна вашего ключа — из 0xArchive) и введённую вами комиссию. Фандинг не учитывается в PnL, поэтому реальный результат может быть другим." /></p>}
       </footer>
       </div>
       </>}

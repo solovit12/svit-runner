@@ -268,7 +268,7 @@ export interface BacktestResponse {
   runId: string;
   runtime: { name: 'PineTS'; version: string; isolatedProcess: true };
   data: {
-    provider: '0xArchive' | 'Binance Futures';
+    provider: '0xArchive' | 'Binance Futures' | 'Hyperliquid';
     venue: 'hyperliquid' | 'binance';
     marketType: 'perpetual';
     symbol: string;
@@ -291,7 +291,7 @@ export interface BacktestResponse {
       mintickModel: 'hyperliquid-minimum-increment-v1' | 'binance-futures-price-filter-v1';
     };
     intrabar: null | {
-      source: '0xArchive Hyperliquid candles' | 'Binance Futures candles';
+      source: '0xArchive Hyperliquid candles' | 'Binance Futures candles' | 'Hyperliquid candles';
       sourceTimeframe: '1m';
       replayTimeframe: '1m';
       bars1m: number;

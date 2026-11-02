@@ -60,7 +60,7 @@ export function PriceChart({ result, loading }: PriceChartProps) {
       <div className="panel-heading">
         <div>
           <span className="eyebrow">MARKET / RESULT</span>
-          <h2>{result ? result.data.symbol : 'Binance Futures'} <small>{result ? `${result.data.timeframe} · Binance USDⓈ-M Perpetual` : 'Historical Binance candles'}</small></h2>
+          <h2>{result ? result.data.symbol : 'Historical candles'} <small>{result ? `${result.data.timeframe} · ${result.data.venue === 'binance' ? 'Binance USDⓈ-M Perpetual' : 'Hyperliquid Perpetual'}` : 'Binance or Hyperliquid'}</small></h2>
         </div>
         <div className="legend"><i className="long" />LONG <i className="exit" />EXIT</div>
       </div>

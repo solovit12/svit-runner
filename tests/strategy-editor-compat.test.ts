@@ -18,8 +18,14 @@ describe('saved backtest settings in the editor', () => {
     expect(backtestSettingsSupportedByEditor(settings)).toBe(true);
   });
 
+  it('loads Hyperliquid settings, including XYZ markets, in USDC', () => {
+    expect(backtestSettingsSupportedByEditor({ ...settings, exchange: 'Hyperliquid', symbol: 'HYPE', baseCurrency: 'USDC' })).toBe(true);
+    expect(backtestSettingsSupportedByEditor({ ...settings, exchange: 'Hyperliquid', symbol: 'xyz:SP500', baseCurrency: 'USDC' })).toBe(true);
+  });
+
   it('refuses API strategies whose venue or hidden fields the UI would silently change', () => {
-    expect(backtestSettingsSupportedByEditor({ ...settings, exchange: 'Hyperliquid', baseCurrency: 'USDC' })).toBe(false);
+    expect(backtestSettingsSupportedByEditor({ ...settings, exchange: 'Hyperliquid', symbol: 'flx:GOLD', baseCurrency: 'USDC' })).toBe(false);
+    expect(backtestSettingsSupportedByEditor({ ...settings, exchange: 'Hyperliquid', symbol: 'HYPE', baseCurrency: 'USDT' })).toBe(false);
     expect(backtestSettingsSupportedByEditor({ ...settings, barIndexOffset: 5 })).toBe(false);
     expect(backtestSettingsSupportedByEditor({ ...settings, timeframe: '1w', barDetailization: 'high' })).toBe(false);
   });

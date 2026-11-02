@@ -563,6 +563,18 @@ tbody tr:hover { background: #141a1c; }
 .paper-xyz-notice > svg { flex: none; margin-top: 2px; color: var(--amber); }
 .paper-xyz-notice strong { display: block; color: #ffe2a8; }
 
+/* Backtest on Hyperliquid: how far back the history reaches and the optional 0xArchive key. */
+.hl-history-panel { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 14px; padding: 11px 13px; border: 1px solid var(--line); background: var(--panel); color: #c5cfd2; font-size: 13px; line-height: 1.5; }
+.hl-history-panel > svg { flex: none; margin-top: 2px; color: var(--green); }
+.hl-history-panel > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.hl-history-panel strong { color: #e8eef0; }
+.hl-history-key { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); }
+.hl-history-key a { color: var(--green); }
+.hl-history-key input { min-width: 220px; flex: 1 1 220px; max-width: 360px; }
+.hl-history-panel .text-button { padding: 0; border: 0; background: none; color: var(--green); font: inherit; text-decoration: underline; cursor: pointer; }
+.hl-history-panel .text-button:disabled { color: var(--muted); cursor: default; }
+.hl-history-error { color: var(--red); }
+
 /* Paper Runs: every run slot is taken — information, not a failure. */
 .paper-slots-note { display: flex; gap: 9px; align-items: center; margin-bottom: 16px; padding: 10px 14px; border: 1px solid var(--line); color: var(--muted); font-size: 13px; }
 .paper-slots-note > svg { flex: none; color: var(--muted); }
