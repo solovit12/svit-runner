@@ -1,4 +1,5 @@
 import { AlertTriangle, ArrowLeft, ArrowRight, Plus, X } from 'lucide-react';
+import { runPath } from '../lib/run-paths';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { readPaperDraft, writePaperDraft } from '../lib/editor-draft';
 import { isXyzMarket } from '../lib/stock-hours';
@@ -618,7 +619,7 @@ export function PaperSetupPreview({ source, fromBacktest, fromEditor = fromBackt
       });
       setLiveConfirmed(false);
       onRuns();
-      window.history.replaceState(null, '', `/paper/${encodeURIComponent(experiment.id)}`);
+      window.history.replaceState(null, '', runPath(experiment.id));
       window.dispatchEvent(new Event('paper-route-changed'));
     } catch (reason) {
       setLaunchError(errorMessage(reason));
@@ -801,7 +802,8 @@ export function PaperSetupPreview({ source, fromBacktest, fromEditor = fromBackt
           ? `; ${VENUES.filter((venue) => !liveVenues.includes(venue)).join(' and ')} markets stay selected for Paper (add that exchange's account on the Accounts page to trade them)` : ''}.</p> : <>
           <label className="paper-add-both"><input type="checkbox" checked={addToBoth} onChange={(event) => setAddToBoth(event.target.checked)} />
             Add to both exchanges when the market is listed on both</label>
-          <p className="paper-market-note">Hyperliquid also lists <strong>xyz:</strong> markets (stocks, indices, commodities by trade.xyz).
+          <p className="paper-market-note">Hyperliquid also lists <strong>xyz:</strong> markets (stocks, indices, commodities by trade.xyz),
+            <strong> io:</strong> (EntropyIO: pre-IPO companies such as io:ANTH and io:OAI, stocks) and <strong>para:</strong> (Paragon: stocks, indices, rates).
             Each has its own fee, shown as a multiple of the Hyperliquid fee above, and trades thinly while its home exchange is closed.</p>
         </>}
         <div className="paper-venue-grid">

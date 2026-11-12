@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { pineCodeError } from '../../../../packages/pine-runtime/src/pine-errors.js';
@@ -52,6 +52,7 @@ export type PaperExperimentControllerErrorKind =
   | 'PAPER_NOT_OWNER'
   | 'PAPER_START_FAILED'
   | 'PAPER_STOP_FAILED'
+  | 'PAPER_RUN_ACTIVE'
   | 'NOT_FOUND';
 
 export class PaperExperimentControllerError extends Error {
@@ -124,6 +125,21 @@ function aggregateStatus(experiment: PaperExperimentDetail): PaperExperimentStat
   return 'preparing';
 }
 
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Removes `<runsDir>/<id>`: only a real sub-folder named by a run id, never a link or anything outside. */
+export function removeRunFolder(runsDir: string, id: string): void {
+  if (!RUN_ID.test(id)) throw new PaperExperimentControllerError('NOT_FOUND', 'Not a run id.');
+  const root = path.resolve(runsDir);
+  const folder = path.join(root, id);
+  if (path.dirname(folder) !== root || !existsSync(folder)) return;
+  const kind = lstatSync(folder);
+  if (kind.isSymbolicLink() || !kind.isDirectory()) {
+    throw new PaperExperimentControllerError('PAPER_UNAVAILABLE', 'The run data is not a plain folder; nothing was deleted.');
+  }
+  rmSync(folder, { recursive: true, force: false });
+}
+
 /** One local API-process owner. No browser lifetime, external orders or credentials. */
 export class PaperExperimentControllerV1 {
   readonly #store: PaperExperimentStoreV1 | null;
@@ -137,6 +153,8 @@ export class PaperExperimentControllerV1 {
   readonly #liveAccountName: (id: string) => string | null;
   readonly #legacyLiveAccountId: (exchange: LiveExchange) => string | null;
   readonly #liveLoadRefusal: (settings: StartPaperExperimentRequest['settings']) => Promise<string | null>;
+  /** Folder of the runs' journals and ledgers (one sub-folder per run id); Delete removes a run's sub-folder. */
+  readonly #runsDir: string | null;
   #otherLiveOwnerReason: string | null = null;
   readonly #managed = new Map<string, ManagedExperiment>();
 
@@ -157,6 +175,8 @@ export class PaperExperimentControllerV1 {
     readonly legacyLiveAccountId?: (exchange: LiveExchange) => string | null;
     /** Why a new Live run must not start for an exchange limit (exchange-load.ts), or null. */
     readonly liveLoadRefusal?: (settings: StartPaperExperimentRequest['settings']) => Promise<string | null>;
+    /** Folder of the runs' data (PAPER_RUNS_DIR); without it Delete removes only the run's rows. */
+    readonly runsDir?: string | null;
   }) {
     this.#store = options.directory ? new PaperExperimentStoreV1(options.directory, options.now) : null;
     this.#directory = options.directory;
@@ -170,6 +190,7 @@ export class PaperExperimentControllerV1 {
     this.#liveAccountName = options.liveAccountName ?? (() => null);
     this.#legacyLiveAccountId = options.legacyLiveAccountId ?? (() => null);
     this.#liveLoadRefusal = options.liveLoadRefusal ?? (async () => null);
+    this.#runsDir = options.runsDir ?? null;
     if (this.#store) {
       try {
         // The previous process may have died after taking a Gateway batch.
@@ -393,6 +414,23 @@ export class PaperExperimentControllerV1 {
   }
 
   /** Runs this engine is running now and nobody has asked to stop. */
+  /**
+   * Deletes a finished run for good: its data folder (journal, ledger, snapshots) and its rows. A run still
+   * going is refused (stop it first). The folder goes first, so a failure leaves the run listed to try again.
+   */
+  delete(id: string): void {
+    if (!this.#store) throw new PaperExperimentControllerError('PAPER_UNAVAILABLE', 'Paper runs are not configured on this server.');
+    const experiment = this.#store.get(id);
+    if (!experiment) throw new PaperExperimentControllerError('NOT_FOUND', 'Paper experiment not found.');
+    const managed = this.#managed.get(id);
+    if ((experiment.status !== 'completed' && experiment.status !== 'interrupted') || (managed && (managed.handle || managed.startPromise))) {
+      throw new PaperExperimentControllerError('PAPER_RUN_ACTIVE', 'Stop the run before deleting it.', experiment);
+    }
+    if (this.#runsDir) removeRunFolder(this.#runsDir, id);
+    this.#store.delete(id);
+    this.#managed.delete(id);
+  }
+
   runningIds(): string[] {
     return [...this.#managed].filter(([, managed]) => managed.handle && !managed.stopRequested).map(([id]) => id);
   }

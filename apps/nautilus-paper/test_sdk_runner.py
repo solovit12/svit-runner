@@ -134,6 +134,28 @@ class RunnerTest(unittest.TestCase):
         self.runner.exec_result(request.id, filled=qty, average=price,
                                 opened=max(Decimal(0), Decimal(qty) - request.close_qty), now_ms=at)
 
+    def test_entry_with_an_amount_in_usdc(self):
+        class Fixed(Strategy):
+            timeframe = "1m"
+            warmup_bars = 0
+
+            def on_quote(self, ctx, quote):
+                if not ctx.orders and ctx.position == 0:
+                    ctx.entry("U", "long", usdc=2000)
+                    for bad in ({"usdc": 2000, "size": 2}, {"usdc": 0}):
+                        try:
+                            ctx.entry("V", "long", **bad)
+                        except ValueError:
+                            ctx.state.setdefault("refused", []).append(bad)
+
+        runner = StrategyRunner(Fixed, params={}, venue="lighter", market="SOL", mintick="0.01")
+        runner.start(T0)
+        runner.on_quote("100.9", "101.0", T0)
+        runner.evaluate(T0 + ARRIVAL_MS)
+        [request] = runner.manager.take_requests()
+        self.assertEqual((request.open_side, request.notional, request.size_scale), ("long", Decimal("2000"), Decimal("1")))
+        self.assertEqual(len(runner.ctx.state["refused"]), 2)
+
     def test_history_bars_warm_up_without_trading(self):
         self.assertEqual(self.events[:2], [("bar", True, 99.0), ("bar", True, 101.0)])
         self.assertEqual(self.runner.orders, {})
@@ -193,6 +215,49 @@ class RunnerTest(unittest.TestCase):
             StrategyRunner(Recorder, params={"x": 1}, venue="lighter", market="SOL", mintick="0.01")
         with self.assertRaisesRegex(ValueError, "at most 5"):
             StrategyRunner(Recorder, params={"size": 9}, venue="lighter", market="SOL", mintick="0.01")
+
+
+class StatusTest(unittest.TestCase):
+    def runner(self):
+        return StrategyRunner(Recorder, params={}, venue="lighter", market="BRENTOIL", mintick="0.01")
+
+    def test_a_panel_is_checked_kept_and_removed(self):
+        runner = self.runner()
+        runner.now_ms = 123
+        runner.ctx.status("BRENTOIL/WTI", "BRENTOIL/WTI: long BRENTOIL, short WTI", markets=["BRENTOIL", "WTI"],
+                          lines=["r 832.1, entry 818.3"], progress={"label": "to take-profit", "value": 13.8,
+                                                                    "target": 25, "unit": "bp", "left_percent": 0.112,
+                                                                    "left_usd": 2.24, "usd": None})
+        self.assertEqual(runner.panels["BRENTOIL/WTI"], {
+            "key": "BRENTOIL/WTI", "title": "BRENTOIL/WTI: long BRENTOIL, short WTI", "at": 123,
+            "markets": ["BRENTOIL", "WTI"], "lines": ["r 832.1, entry 818.3"],
+            "progress": {"label": "to take-profit", "value": 13.8, "target": 25.0, "unit": "bp",
+                         "leftPercent": 0.112, "leftUsd": 2.24}})
+        runner.ctx.status("BRENTOIL/WTI", None)
+        self.assertEqual(runner.panels, {})
+
+    def test_bad_panels_raise_and_the_count_is_capped(self):
+        runner = self.runner()
+        for bad in ({"value": 1, "target": 0}, {"value": float("nan"), "target": 1}, {"value": 1}):
+            with self.assertRaises((ValueError, KeyError)):
+                runner.ctx.status("k", "title", progress=bad)
+        with self.assertRaises(ValueError):
+            runner.ctx.status("k", "title", progress={"value": 1, "target": 2, "stop": 5})
+        runner.ctx.status("k", "title", progress={"value": -1, "target": 2, "stop": -150})
+        self.assertEqual(runner.panels["k"]["progress"]["stop"], -150.0)
+        runner.ctx.status("k", None)
+        with self.assertRaises(ValueError):
+            runner.ctx.status("k", "title", lines="one string")
+        with self.assertRaises(ValueError):
+            runner.ctx.status("k", "  ")
+        for index in range(12):
+            runner.ctx.status(f"k{index}", "t", lines=["x" * 500] * 9, markets=["M"] * 9)
+        self.assertEqual(len(runner.panels), 8)
+        self.assertEqual(len(runner.panels["k0"]["lines"]), 6)
+        self.assertEqual(len(runner.panels["k0"]["lines"][0]), 200)
+        self.assertEqual(len(runner.panels["k0"]["markets"]), 4)
+        runner.ctx.status("k0", "replaced")
+        self.assertEqual(runner.panels["k0"]["title"], "replaced")
 
 
 class PackTest(unittest.TestCase):

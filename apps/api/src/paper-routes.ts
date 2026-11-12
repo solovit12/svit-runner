@@ -11,8 +11,8 @@ import {
 } from './paper-execution/paper-experiment-controller.js';
 import { listPythonStrategies } from './paper-execution/pine-paper-factory.js';
 import { fetchVenueCatalog, type PaperVenueKey, type VenueMarket } from './paper-execution/venue-markets.js';
-import { PaperExperimentActivityQueryError, readPaperExperimentActivityV1 } from './paper-execution/paper-experiment-activity.js';
-import { readNautilusPaperLedgerSnapshot, readNautilusPaperSnapshot } from './paper-execution/nautilus-paper-ledger.js';
+import { PaperExperimentActivityQueryError, readPaperExperimentActivityV1, readPaperExperimentTradesV1 } from './paper-execution/paper-experiment-activity.js';
+import { forgetNautilusPaperRun, readNautilusPaperLedgerSnapshot, readNautilusPaperSnapshot } from './paper-execution/nautilus-paper-ledger.js';
 
 export function isCrossOriginPaperWrite(request: FastifyRequest): boolean {
   if (request.headers['sec-fetch-site'] === 'cross-site') return true;
@@ -179,6 +179,13 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
     },
   );
 
+  app.get<{ Params: { id: string } }>('/api/paper-experiments/:id/trades', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const experiment = paperExperiments.get(request.params.id);
+    if (!experiment) return reply.code(404).send({ kind: 'PAPER_EXPERIMENT_NOT_FOUND', error: 'Paper experiment not found.' });
+    return { trades: readPaperExperimentTradesV1({ detail: experiment, runtimeDirectory: paperRunsDir }) };
+  });
+
   app.post('/api/paper-experiments', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (isCrossOriginPaperWrite(request)) {
@@ -204,6 +211,28 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
       }
       throw error;
     }
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/paper-experiments/:id', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (isCrossOriginPaperWrite(request)) {
+      return reply.code(403).send({ kind: 'PAPER_ORIGIN_FORBIDDEN', error: 'Paper changes require a same-origin request.' });
+    }
+    const experiment = paperExperiments.get(request.params.id);
+    try {
+      paperExperiments.delete(request.params.id);
+    } catch (error) {
+      if (error instanceof PaperExperimentControllerError) {
+        const status = error.kind === 'NOT_FOUND' ? 404 : error.kind === 'PAPER_RUN_ACTIVE' ? 409 : 503;
+        return reply.code(status).send({ kind: error.kind, error: error.message });
+      }
+      throw error;
+    }
+    if (experiment) {
+      endedPnl.delete(endedKey(experiment));
+      if (paperRunsDir) forgetNautilusPaperRun(experiment.id, path.join(paperRunsDir, experiment.id));
+    }
+    return { deleted: request.params.id };
   });
 
   app.post<{ Params: { id: string } }>('/api/paper-experiments/:id/stop', async (request, reply) => {

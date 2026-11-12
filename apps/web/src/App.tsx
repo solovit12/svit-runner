@@ -1,4 +1,5 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
+import { isRunSetupPath, isRunsPath, newRunsAddress, RUN_SETUP_PATH, RUNS_PATH, runPath } from './lib/run-paths';
 import { AlertTriangle, Play, Settings2, ShieldCheck, Square } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_SLIPPAGE_PERCENT, PINETS_VERSION, type BacktestRequest, type BacktestResponse, type BacktestTimeframe, type PresetResponse } from '../../../packages/shared/src/contracts';
@@ -74,8 +75,11 @@ type EditorSnapshot = {
 
 function pageFromPath(): AppPage {
   if (typeof window === 'undefined') return 'backtest';
-  if (window.location.pathname === '/paper/setup') return 'paper-setup';
-  if (window.location.pathname.startsWith('/paper')) return 'paper-runs';
+  // Old /paper addresses (bookmarks) open the same page under its new address.
+  const moved = newRunsAddress(window.location.pathname);
+  if (moved) window.history.replaceState(null, '', `${moved}${window.location.search}${window.location.hash}`);
+  if (isRunSetupPath(window.location.pathname)) return 'paper-setup';
+  if (isRunsPath(window.location.pathname)) return 'paper-runs';
   if (window.location.pathname === '/accounts') return 'accounts';
   return 'backtest';
 }
@@ -343,7 +347,7 @@ export function App() {
   const navigate = (next: AppPage) => {
     setBrowseStrategies(false);
     setSaveDialogOpen(false);
-    const path = next === 'paper-setup' ? '/paper/setup' : next === 'paper-runs' ? '/paper' : next === 'accounts' ? '/accounts' : '/';
+    const path = next === 'paper-setup' ? RUN_SETUP_PATH : next === 'paper-runs' ? RUNS_PATH : next === 'accounts' ? '/accounts' : '/';
     window.history.pushState(null, '', path);
     window.dispatchEvent(new Event('paper-route-changed'));
     // Switching between the Strategy tabs keeps the editor in view.
@@ -354,7 +358,7 @@ export function App() {
   /** Opens one run's page (Paper Runs), e.g. from the account that run trades. */
   const openRun = (runId: string) => {
     navigate('paper-runs');
-    window.history.replaceState(null, '', `/paper/${encodeURIComponent(runId)}`);
+    window.history.replaceState(null, '', runPath(runId));
     window.dispatchEvent(new Event('paper-route-changed'));
   };
 

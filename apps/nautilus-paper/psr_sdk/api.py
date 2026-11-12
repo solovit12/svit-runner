@@ -148,6 +148,12 @@ class Strategy:
     max_positions_per_venue: int | None = None
     #: True: the market's public trades also reach on_trade (e.g. to measure volume).
     uses_trades: bool = False
+    #: Live, for hedged legs (a pair strategy): the exchange-side protection becomes a bracket.
+    #: Besides the reduce-only stop the run's Exchange stop % from the entry, each position gets a
+    #: reduce-only take-profit the same distance on the other side, so a move of both legs together
+    #: closes both on the exchange (one by its stop, the other by its take-profit) even when the
+    #: server is down. Either one executing while the run works halts the run, as the stop does.
+    exchange_take_profit: bool = False
     params: dict = {}
 
     def on_start(self, ctx):

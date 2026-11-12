@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -7,7 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { buildApp } from '../apps/api/src/server';
 import {
-  PaperExperimentControllerV1, SERVER_SHUTDOWN_REASON, type PaperExperimentRuntimeFactory, type PaperExperimentStopProof,
+  PaperExperimentControllerError, PaperExperimentControllerV1, removeRunFolder, SERVER_SHUTDOWN_REASON,
+  type PaperExperimentRuntimeFactory, type PaperExperimentStopProof,
 } from '../apps/api/src/paper-execution/paper-experiment-controller';
 import { PaperExperimentStoreError, PaperExperimentStoreV1 } from '../apps/api/src/paper-execution/paper-experiment-store';
 import { MAX_CONCURRENT_PAPER_EXPERIMENTS as MAX_RUNS, StartPaperExperimentSchema } from '../packages/shared/src/paper-experiment-contracts';
@@ -179,6 +181,72 @@ describe('Paper experiment control API', () => {
       expect(list.statusCode).toBe(200);
       expect(list.json().experiments).toEqual([]);
     } finally { await app.close(); }
+  });
+
+  it('deletes a finished run with its data folder, never a run still going', async () => {
+    const root = await tempRoot();
+    const runs = path.join(root, 'runs');
+    const app = await buildApp({ strategyCatalogDir: path.join(root, 'catalog'), paperExperimentsDir: path.join(root, 'paper'),
+      paperRunsDir: runs, paperRuntimeFactory: { preflight: async () => undefined,
+        start: async () => ({ stop: async () => interruptedStopProof }), abortStart: async () => interruptedStopProof } });
+    try {
+      const strategyId = await saveStrategy(app);
+      const started = await app.inject({ method: 'POST', url: '/api/paper-experiments', payload: launch(strategyId) });
+      expect(started.statusCode, started.body).toBe(201);
+      const id = started.json().experiment.id as string;
+      const kept = await app.inject({ method: 'POST', url: '/api/paper-experiments', payload: launch(strategyId) });
+      const other = kept.json().experiment.id as string;
+      await mkdir(path.join(runs, id), { recursive: true });
+      await writeFile(path.join(runs, id, 'nautilus-events.jsonl'), '{}\n');
+      await mkdir(path.join(runs, other), { recursive: true });
+
+      const going = await app.inject({ method: 'DELETE', url: `/api/paper-experiments/${id}` });
+      expect(going.statusCode).toBe(409);
+      expect(going.json().kind).toBe('PAPER_RUN_ACTIVE');
+      expect(existsSync(path.join(runs, id, 'nautilus-events.jsonl'))).toBe(true);
+      expect((await app.inject({ method: 'POST', url: `/api/paper-experiments/${id}/stop` })).statusCode).toBe(200);
+
+      const foreign = await app.inject({ method: 'DELETE', url: `/api/paper-experiments/${id}`, headers: { origin: 'https://other.example' } });
+      expect(foreign.statusCode).toBe(403);
+      const deleted = await app.inject({ method: 'DELETE', url: `/api/paper-experiments/${id}` });
+      expect(deleted.statusCode, deleted.body).toBe(200);
+      expect(deleted.json()).toEqual({ deleted: id });
+      expect(existsSync(path.join(runs, id))).toBe(false);
+      expect(existsSync(path.join(runs, other))).toBe(true);
+      expect((await app.inject({ method: 'GET', url: `/api/paper-experiments/${id}` })).statusCode).toBe(404);
+      const list = await app.inject({ method: 'GET', url: '/api/paper-experiments' });
+      expect(list.json().experiments.map((item: { id: string }) => item.id)).toEqual([other]);
+      expect((await app.inject({ method: 'DELETE', url: `/api/paper-experiments/${id}` })).statusCode).toBe(404);
+    } finally { await app.close(); }
+  });
+
+  it('removes only a plain run folder named by a run id', async () => {
+    const root = await tempRoot();
+    const runs = path.join(root, 'runs');
+    const id = randomUUID();
+    await mkdir(path.join(root, 'elsewhere'), { recursive: true });
+    await mkdir(runs, { recursive: true });
+    await symlink(path.join(root, 'elsewhere'), path.join(runs, id));
+    expect(() => removeRunFolder(runs, id)).toThrow(PaperExperimentControllerError);
+    expect(existsSync(path.join(root, 'elsewhere'))).toBe(true);
+    expect(() => removeRunFolder(runs, '../paper')).toThrow(/run id/);
+    expect(() => removeRunFolder(runs, randomUUID())).not.toThrow();            // nothing there: nothing to do
+  });
+
+  it('refuses to delete a run of the store that is still going', () => {
+    const directory = path.join(os.tmpdir(), `pine-paper-delete-${randomUUID()}`);
+    directories.push(directory);
+    const store = new PaperExperimentStoreV1(directory);
+    try {
+      const run = store.reserve({ request: { strategyId: randomUUID(), version: 1, sourceSha256: hash,
+        settings: StartPaperExperimentSchema.parse(launch(randomUUID())).settings, idempotencyKey: randomUUID() },
+      strategyName: 'Pilot', source }).experiment;
+      expect(() => store.delete(run.id)).toThrow(PaperExperimentStoreError);
+      store.setStatus(run.id, 'interrupted', 'stopped');
+      store.delete(run.id);
+      expect(store.get(run.id)).toBeNull();
+      expect(() => store.delete(run.id)).toThrow(/not found/);
+    } finally { store.close(); }
   });
 
   it('rejects cross-origin browser requests to start or stop Paper', async () => {

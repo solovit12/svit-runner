@@ -229,6 +229,8 @@ export interface PaperExperimentSummary {
   readonly capitalPerVenue?: number | null;
   /** True for a Live run (real orders on the run's exchanges). */
   readonly live?: boolean;
+  /** A Python strategy's launch parameters (the runs list tells same-name runs apart); absent for Pine runs. */
+  readonly params?: Readonly<Record<string, number | boolean | string>>;
   /** Total PnL per exchange at the last account snapshot (the runs list); absent when not reported. */
   readonly pnl?: readonly VenuePnl[];
 }
@@ -270,6 +272,8 @@ export interface PaperExperimentRuntimeView {
     /** Present while this market waits for fresh data after a gap; other markets keep trading. */
     readonly dataGap?: { readonly sinceMs: number; readonly connected: boolean; readonly resubscribes: number };
   }[];
+  /** Status panels of a Python strategy (ctx.status), e.g. each pair's way to its take-profit; newest snapshot only. */
+  readonly panels?: readonly PaperStrategyPanel[];
   readonly accounts: readonly {
     readonly venue: PaperExperimentAccount['venue'];
     readonly accountId: string;
@@ -303,6 +307,32 @@ export interface PaperExperimentRuntimeView {
       readonly openedAt?: string;
     }[];
   }[];
+}
+
+/** One status panel a Python strategy shows on its run page (ctx.status in psr_sdk). */
+export interface PaperStrategyPanel {
+  readonly key: string;
+  readonly title: string;
+  /** Strategy time of the panel, ms. */
+  readonly at: number;
+  /** Markets the panel is about; the page groups their trades together. */
+  readonly markets: readonly string[];
+  readonly lines: readonly string[];
+  /** A bar of value / target (e.g. the gain so far toward the take-profit, in bp). */
+  readonly progress?: {
+    readonly label: string;
+    readonly value: number;
+    readonly target: number;
+    readonly unit: string;
+    /** Price move still needed, in percent. */
+    readonly leftPercent?: number;
+    /** Money still to come at the target, USD. */
+    readonly leftUsd?: number;
+    /** Money now (unrealized PnL of the panel's positions), USD. */
+    readonly usd?: number;
+    /** Where the trade closes at a loss (below zero, same unit): a negative value is drawn as the way to it. */
+    readonly stop?: number;
+  };
 }
 
 /** A concise timeline reconstructed from persisted control milestones and Broker commits. */
@@ -341,5 +371,46 @@ export interface PaperExperimentActivity {
   /** Exact across both venue journals only when coverage is durable_journal. */
   readonly totalFills: number | null;
   readonly nextFillsCursor: string | null;
+  readonly coverage: 'durable_journal' | 'control_only' | 'partial';
+}
+
+/** One position of one market, from its first entry fill until it is flat again (several fills). */
+export interface PaperTradeLeg {
+  readonly venue: PaperExperimentAccount['venue'];
+  readonly market: string;
+  readonly side: 'long' | 'short';
+  readonly openedAt: string | null;
+  /** Null while the position is still open. */
+  readonly closedAt: string | null;
+  /** Largest open quantity of the position. */
+  readonly quantity: number;
+  /** Quantity-weighted entry and exit prices. */
+  readonly entryPrice: number | null;
+  readonly exitPrice: number | null;
+  /** USD value of the entry fills. */
+  readonly entryValue: number;
+  /** Sum of the exit fills' realized PnL (null if a fill has none); fees as charged. */
+  readonly realizedPnl: number | null;
+  readonly fees: number;
+  readonly fills: number;
+}
+
+/** Legs opened together (both legs of a pair; a single market otherwise), newest first in the list. */
+export interface PaperTradeGroup {
+  readonly id: string;
+  /** "BRENTOIL/WTI" for a pair (the strategy's panel order when it shows one), else the market. */
+  readonly name: string;
+  readonly openedAt: string | null;
+  /** Null while a leg is still open. */
+  readonly closedAt: string | null;
+  readonly realizedPnl: number | null;
+  readonly fees: number;
+  readonly legs: readonly PaperTradeLeg[];
+}
+
+export interface PaperExperimentTrades {
+  readonly groups: readonly PaperTradeGroup[];
+  /** More groups exist than the list holds (the oldest are left out). */
+  readonly truncated: boolean;
   readonly coverage: 'durable_journal' | 'control_only' | 'partial';
 }

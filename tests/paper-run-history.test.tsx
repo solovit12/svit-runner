@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PaperPositionsTable, PaperRunActivity, PaperRunDataGaps, PaperRunHealth, PaperRunRules, PaperRunHistory, PaperRunTrackTable, PaperRuns } from '../apps/web/src/components/PaperRuns';
+import { PaperPositionsTable, PaperRunActivity, PaperRunDataGaps, PaperRunHealth, PaperRunRules, PaperRunHistory, PaperRunTrackTable, PaperRuns, StopRunDialog, DeleteRunDialog } from '../apps/web/src/components/PaperRuns';
 import type { PaperExperimentActivity, PaperExperimentSummary, PaperExperimentDetail } from '../packages/shared/src/paper-experiment-contracts';
 
 const sample: PaperExperimentSummary = {
@@ -89,6 +89,55 @@ describe('Paper run history', () => {
     expect(html).toContain('Stop needs attention');
     expect(html).not.toContain('Same-millisecond market event');
     expect(html).not.toContain('Paper runtime stop failed');
+  });
+
+  it('shows the strategy parameters right after Total PnL and a Stop button for active runs only', () => {
+    const params = { pairs: 'BRENTOIL/WTI, XAU/XAG', ema_minutes: 30, windows: 'cme_closed' };
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, {
+      experiments: [{ ...sample, id: 'run-a', status: 'running', reason: null, endedAt: null, params },
+        { ...sample, id: 'run-b', status: 'completed', reason: null }],
+      onOpen: () => undefined, onStop: () => undefined,
+    }));
+    const headers = [...html.matchAll(/<th>([A-Za-z /]+)/g)].map((match) => match[1]!.trim());
+    expect(headers.slice(0, 5)).toEqual(['Strategy', 'Status', 'Total PnL', 'Strategy parameters', 'Venues']);
+    expect(headers.at(-1)).toBe('Actions');
+    expect(html).toContain('<span>pairs = BRENTOIL/WTI, XAU/XAG</span><span>ema_minutes = 30</span><span>windows = cme_closed</span>');
+    const [first, second] = html.split('<tbody>')[1]!.split('</tr>');
+    expect(first).toContain('aria-label="Stop run run-a of Range Levels"');
+    expect(first).toContain('>Stop</button>');
+    expect(second).not.toContain('<button');
+    expect(second).toContain('<td>—</td>');
+  });
+
+  it('asks "are you sure" before a stop and says what a LIVE stop does', () => {
+    const run = { id: 'run-a', strategyName: 'Pair reversion', live: false, exchanges: 'Lighter and Hyperliquid' };
+    const paper = renderToStaticMarkup(createElement(StopRunDialog, { run, busy: false, onCancel: () => undefined, onConfirm: () => undefined }));
+    expect(paper).toContain('Stop this run?');
+    expect(paper).toContain('Are you sure you want to stop <strong>Pair reversion</strong>?');
+    expect(paper).toContain('Run run-a');
+    expect(paper).toContain('>Cancel</button>');
+    expect(paper).toContain('>Yes, stop</button>');
+    const live = renderToStaticMarkup(createElement(StopRunDialog, { run: { ...run, live: true }, busy: true, onCancel: () => undefined, onConfirm: () => undefined }));
+    expect(live).toContain('Stop this LIVE run?');
+    expect(live).toContain('closed at market on Lighter and Hyperliquid');
+    expect(live).toContain('Stopping…');
+  });
+
+  it('offers Delete only for finished runs and asks "are you sure" first', () => {
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, {
+      experiments: [{ ...sample, id: 'done', status: 'interrupted' }, { ...sample, id: 'going', status: 'running', endedAt: null }],
+      onOpen: () => undefined, onStop: () => undefined, onDelete: () => undefined,
+    }));
+    expect(html).toContain('aria-label="Delete run done of Range Levels"');
+    expect(html).not.toContain('aria-label="Delete run going');
+    expect(html).toContain('aria-label="Stop run going of Range Levels"');
+    const run = { id: 'run-a', strategyName: 'Pair reversion', live: true, exchanges: 'Lighter' };
+    const dialog = renderToStaticMarkup(createElement(DeleteRunDialog, { run, busy: false, onCancel: () => undefined, onConfirm: () => undefined }));
+    expect(dialog).toContain('Delete this LIVE run?');
+    expect(dialog).toContain('Are you sure you want to delete <strong>Pair reversion</strong>?');
+    expect(dialog).toContain('This cannot be undone.');
+    expect(dialog).toContain('The real trades stay in your Lighter account history');
+    expect(dialog).toContain('>Yes, delete</button>');
   });
 
   it('does not put the history table on a specific run page', () => {

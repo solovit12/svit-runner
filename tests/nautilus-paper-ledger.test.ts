@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  NautilusPaperLedger, readNautilusPaperLedgerSnapshot, readNautilusPaperSnapshot, reconcileNautilusPaperOutbox,
+  NautilusPaperLedger, forgetCheckedOutboxesForTests, readNautilusPaperLedgerSnapshot, readNautilusPaperSnapshot,
+  reconcileNautilusPaperOutbox,
 } from '../apps/api/src/paper-execution/nautilus-paper-ledger.js';
-import { readPaperExperimentActivityV1 } from '../apps/api/src/paper-execution/paper-experiment-activity.js';
+import { readPaperExperimentActivityV1, readPaperExperimentTradesV1 } from '../apps/api/src/paper-execution/paper-experiment-activity.js';
 import { PaperExperimentStoreV1 } from '../apps/api/src/paper-execution/paper-experiment-store.js';
 
 const NAUTILUS_PAPER_MARKETS = ['HYPE', 'SOL', 'XRP', 'SUI', 'DOGE'] as const;
@@ -164,6 +165,36 @@ describe('Nautilus Paper durable ledger', () => {
     ledger.append({ ...envelope(detail.id, 1), type: 'snapshot', stage: 'running', accounts: accounts(), tracks });
     ledger.close();
     expect(readNautilusPaperSnapshot(detail, directory)!.tracks).toHaveLength(30);
+  });
+
+  it('passes strategy status panels to the page and groups the fills by position', () => {
+    const { runs, directory, detail, snapshot } = fixture([{ venue: 'Lighter', market: 'HYPE' }, { venue: 'Lighter', market: 'SOL' },
+      { venue: 'Hyperliquid', market: 'HYPE' }]);
+    const ledger = new NautilusPaperLedger(directory, snapshot);
+    const panel = { key: 'HYPE/SOL', title: 'HYPE/SOL · long HYPE, short SOL', at: 1, markets: ['HYPE', 'SOL'],
+      lines: ['r 12.0 bp from the mean'], progress: { label: 'to take-profit', value: 13.8, target: 25, unit: 'bp',
+        leftPercent: 0.112, leftUsd: 2.24, usd: 2.76 } };
+    const base = { ...envelope(detail.id, 1), type: 'snapshot', stage: 'running', accounts: accounts() };
+    expect(() => ledger.append({ ...base, panels: [{ ...panel, progress: { ...panel.progress, target: 0 } }] })).toThrow();
+    expect(() => ledger.append({ ...base, panels: [{ ...panel, script: 'x' }] })).toThrow();
+    ledger.append({ ...base, panels: [panel] });
+    const leg = (seq: number, market: 'HYPE' | 'SOL', kind: 'entry' | 'exit', side: 'long' | 'short', pnl: string | null) => ({
+      ...envelope(detail.id, seq), type: 'fill' as const, venue: 'Lighter' as const, id: `f${seq}`, market, kind,
+      side: ((kind === 'entry') === (side === 'long') ? 'buy' : 'sell') as 'buy' | 'sell', positionSide: side,
+      quantity: '1', quote: '100', price: '100', fee: '0', realizedPnl: pnl });
+    ledger.append(leg(2, 'HYPE', 'entry', 'long', null));
+    ledger.append(leg(3, 'SOL', 'entry', 'short', null));
+    ledger.append(leg(4, 'HYPE', 'exit', 'long', '-1.5'));
+    ledger.append(leg(5, 'SOL', 'exit', 'short', '2.25'));
+    expect(ledger.snapshot()?.panels).toEqual([panel]);
+    ledger.close();
+    expect(readNautilusPaperSnapshot(detail, directory)!.panels).toEqual([panel]);
+    const trades = readPaperExperimentTradesV1({ detail, runtimeDirectory: runs });
+    expect(trades.coverage).toBe('durable_journal');
+    expect(trades.groups).toHaveLength(1);
+    expect(trades.groups[0]).toMatchObject({ name: 'HYPE/SOL', realizedPnl: 0.75 });
+    expect(trades.groups[0]!.legs.map((one) => [one.market, one.side, one.realizedPnl])).toEqual([
+      ['HYPE', 'long', -1.5], ['SOL', 'short', 2.25]]);
   });
 
   it('rejects foreign, missing and repeated track facts before any SQLite append', () => {
@@ -378,6 +409,38 @@ describe('Nautilus Paper durable ledger', () => {
     expect(result).toMatchObject({ coverage: 'durable_journal', totalFills: 2 });
     expect(result.fills.map((row) => row.id)).toEqual(['child-fill-2', 'child-fill-1']);
     expect(result.events.some((event) => event.message.includes('Recovered 1 durable Nautilus event'))).toBe(true);
+  });
+
+  it('checks a stopped run\'s outbox once: after an API restart the saved check is used until a file changes', () => {
+    // 2026-11-12: the first look at a week-long stopped run re-read 264 MB in the API thread for 132 s.
+    const { directory, detail, snapshot } = fixture();
+    const first = fill(detail.id, 1, 'Lighter', 'child-fill-1');
+    const second = fill(detail.id, 2, 'Hyperliquid', 'child-fill-2');
+    const ledger = new NautilusPaperLedger(directory, snapshot);
+    ledger.append({ ...first, sourceSeq: 1 });
+    ledger.close();
+    outbox(directory, [first, second]);
+    childFiles(directory, detail.id, 2_147_483_647);
+    const terminal = { ...detail, status: 'interrupted' as const };
+    expect(reconcileNautilusPaperOutbox(terminal, directory)).toEqual({ recovered: 1 });
+    const saved = JSON.parse(readFileSync(path.join(directory, 'nautilus-reconciled.json'), 'utf8'));
+    expect(saved).toMatchObject({ experimentId: detail.id, ledgerRows: 3 });
+    forgetCheckedOutboxesForTests();                    // the API restarted
+    // A writer holds the ledger: the full check (a write transaction) could not run; the saved one only reads.
+    const writer = new DatabaseSync(path.join(directory, 'nautilus.sqlite'));
+    writer.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;');
+    try {
+      expect(reconcileNautilusPaperOutbox(terminal, directory)).toEqual({ recovered: 0 });
+    } finally { writer.exec('ROLLBACK;'); writer.close(); }
+    // Another run's or a broken record is ignored; a changed outbox gets the full check again.
+    forgetCheckedOutboxesForTests();
+    writeFileSync(path.join(directory, 'nautilus-reconciled.json'), JSON.stringify({ ...saved, experimentId: randomUUID() }));
+    expect(reconcileNautilusPaperOutbox(terminal, directory)).toEqual({ recovered: 0 });
+    forgetCheckedOutboxesForTests();
+    writeFileSync(path.join(directory, 'nautilus-reconciled.json'), '{not json');
+    expect(reconcileNautilusPaperOutbox(terminal, directory)).toEqual({ recovered: 0 });
+    outbox(directory, [first, second, fill(detail.id, 3, 'Lighter', 'child-fill-3')]);
+    expect(reconcileNautilusPaperOutbox(terminal, directory)).toEqual({ recovered: 1 });
   });
 
   it('reads the ledger snapshot for lists without replaying the outbox; the full read replays it', () => {

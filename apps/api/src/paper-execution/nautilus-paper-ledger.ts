@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -14,13 +14,21 @@ import type {
   PaperExperimentActivityFill,
   PaperExperimentDetail,
   PaperExperimentRuntimeView,
+  PaperExperimentTrades,
 } from '../../../../packages/shared/src/paper-experiment-contracts.js';
 import type { PaperExperimentSnapshot } from './paper-experiment-store.js';
+import { groupTrades } from './paper-trade-groups.js';
 
 const FILE = 'nautilus.sqlite';
 const OUTBOX_FILE = 'nautilus-events.jsonl';
 const OWNER_FILE = 'nautilus-owner.json';
 const CHILD_FILE = 'nautilus-child.json';
+/**
+ * The last full outbox check of a terminal run, kept next to its ledger: a run of a week has a journal of several
+ * hundred MB and its full check blocked this API for 132 s (2026-11-12) - it now runs once per run, not once per
+ * API start. Only a hint: it is used when the outbox and the ledger are byte-for-byte where the check left them.
+ */
+const RECONCILED_FILE = 'nautilus-reconciled.json';
 const SCHEMA = 'nautilus-paper-ledger-v1';
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_OUTBOX_BYTES = 512 * 1024 * 1024; // matches the Python outbox cap (multi-day runs)
@@ -83,6 +91,26 @@ const DataGap = z.object({
   connected: z.boolean(),
   resubscribes: Count,
 }).strict();
+const PanelNumber = z.number().finite().min(-1e12).max(1e12);
+/** A Python strategy's status panel (ctx.status): shown under Open positions, e.g. a pair's way to its take-profit. */
+const Panel = z.object({
+  key: z.string().min(1).max(80),
+  title: z.string().min(1).max(120),
+  at: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  markets: z.array(z.string().min(1).max(40)).max(4),
+  lines: z.array(z.string().min(1).max(200)).max(6),
+  progress: z.object({
+    label: z.string().min(1).max(60),
+    value: PanelNumber,
+    target: PanelNumber.refine((value) => value !== 0),
+    unit: z.string().max(8),
+    leftPercent: PanelNumber.optional(),
+    leftUsd: PanelNumber.optional(),
+    usd: PanelNumber.optional(),
+    /** Where the trade closes at a loss (below zero, same unit as value). */
+    stop: PanelNumber.refine((value) => value < 0).optional(),
+  }).strict().optional(),
+}).strict();
 const SnapshotTrack = SnapshotAccount.omit({ cashBalance: true, startBalance: true, halted: true, brokerRevision: true, positions: true })
   .extend({ market: Market, dataGap: DataGap.optional() }).strict();
 const Message = z.discriminatedUnion('type', [
@@ -91,7 +119,8 @@ const Message = z.discriminatedUnion('type', [
     message: Text }).strict(),
   z.object({ ...Base, type: z.literal('snapshot'),
     stage: z.enum(['waiting_for_data', 'running', 'recovering', 'stopping']),
-    accounts: z.array(SnapshotAccount).length(2), tracks: z.array(SnapshotTrack).min(1).max(MAX_MARKETS_PER_RUN).optional() }).strict(),
+    accounts: z.array(SnapshotAccount).length(2), tracks: z.array(SnapshotTrack).min(1).max(MAX_MARKETS_PER_RUN).optional(),
+    panels: z.array(Panel).min(1).max(16).optional() }).strict(),
   z.object({ ...Base, type: z.literal('event'), market: Market.optional(), message: Text }).strict(),
   z.object({ ...Base, type: z.literal('failure'), market: Market.optional(), message: Text }).strict(),
   z.object({ ...Base, type: z.literal('fill'), venue: Venue,
@@ -301,6 +330,7 @@ function view(message: Extract<NautilusPaperMessageV1, { type: 'snapshot' }>,
     fundingTreatment: 'excluded' as const,
     observedAt: new Date(message.at).toISOString(),
     ...(message.tracks ? { tracks: message.tracks } : {}),
+    ...(message.panels ? { panels: message.panels } : {}),
     accounts: message.accounts.map((account) => {
       const identity = expected.accounts.find((candidate) => candidate.venue === account.venue)!;
       return { ...account, accountId: identity.accountId, runId: identity.runId };
@@ -458,13 +488,16 @@ export function reconcileNautilusPaperOutbox(
   if (!proveChildDead(detail, directory)) {
     throw new NautilusPaperOutboxRecoveryError('Nautilus child identity is missing.');
   }
-  const cached = recoveredOutboxes.get(path.resolve(directory));
+  const cached = recoveredOutboxes.get(path.resolve(directory)) ?? savedReconciliation(directory, detail.id);
   if (cached && canonical(cached.outbox) === canonical(outboxFile.identity)) {
     const read = openReadOnly(directory, expected);
     if (read) {
       try {
         const count = read.prepare('SELECT COUNT(*) AS n FROM nautilus_records').get() as { n: number };
-        if (count.n === cached.ledgerRows) return { recovered: 0 };
+        if (count.n === cached.ledgerRows) {
+          recoveredOutboxes.set(path.resolve(directory), cached);
+          return { recovered: 0 };
+        }
       } finally { read.close(); }
     }
   }
@@ -512,11 +545,42 @@ export function reconcileNautilusPaperOutbox(
         insert.run(audit.seq, audit.at, audit.type, payload, sha256(payload));
       }
       db.exec('COMMIT;');
-      recoveredOutboxes.set(path.resolve(directory), { outbox: outboxFile.identity,
-        ledgerRows: nextSeq + (recovered ? 1 : 0) - 1 });
+      const checked = { outbox: outboxFile.identity, ledgerRows: nextSeq + (recovered ? 1 : 0) - 1 };
+      recoveredOutboxes.set(path.resolve(directory), checked);
+      saveReconciliation(directory, detail.id, checked);
       return { recovered };
     } catch (error) { db.exec('ROLLBACK;'); throw error; }
   } finally { db.close(); }
+}
+
+/** Tests only: forget the in-memory outbox checks, as a restart of this API does. */
+export function forgetCheckedOutboxesForTests(): void {
+  recoveredOutboxes.clear();
+}
+
+function savedReconciliation(directory: string, experimentId: string):
+  { readonly outbox: FileIdentity; readonly ledgerRows: number } | null {
+  try {
+    const buffer = checkedCompanionFile(directory, RECONCILED_FILE, 8192);
+    if (!buffer) return null;
+    const raw = JSON.parse(buffer.toString('utf8')) as Record<string, unknown>;
+    const outbox = raw.outbox as Record<string, unknown> | undefined;
+    const numbers = ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'];
+    if (raw.experimentId !== experimentId || !Number.isSafeInteger(raw.ledgerRows) || (raw.ledgerRows as number) < 0
+      || !outbox || typeof outbox !== 'object' || Object.keys(outbox).length !== numbers.length
+      || !numbers.every((key) => typeof outbox[key] === 'number' && Number.isFinite(outbox[key]))) return null;
+    return { outbox: outbox as unknown as FileIdentity, ledgerRows: raw.ledgerRows as number };
+  } catch { return null; }   // a broken hint only costs the full check
+}
+
+function saveReconciliation(directory: string, experimentId: string,
+  checked: { readonly outbox: FileIdentity; readonly ledgerRows: number }): void {
+  const file = path.join(path.resolve(directory), RECONCILED_FILE);
+  const temporary = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify({ experimentId, ...checked }), { mode: 0o600 });
+    renameSync(temporary, file);
+  } catch { /* the in-memory record still holds for this API process */ }
 }
 
 function controlEvents(detail: PaperExperimentDetail): PaperExperimentActivityEvent[] {
@@ -686,6 +750,46 @@ export function readNautilusPaperLedgerSnapshot(detail: PaperExperimentDetail, d
   if (!db) return null;
   try { return latestSnapshot(db, bindingFromDetail(detail)); }
   finally { db.close(); }
+}
+
+/** Fills read for the trade groups, newest kept: enough for weeks of a pair run (~20 fills a day per pair). */
+const MAX_GROUPED_FILLS = 20_000;
+const tradeCache = new Map<string, { readonly key: string; readonly fills: PaperExperimentActivityFill[] }>();
+
+/** A deleted run: forget what this process keeps about it. */
+export function forgetNautilusPaperRun(id: string, directory: string): void {
+  tradeCache.delete(id);
+  recoveredOutboxes.delete(path.resolve(directory));
+}
+
+/** Every fill of the run grouped into positions (entry to flat) and the legs opened together. */
+export function readNautilusPaperTrades(detail: PaperExperimentDetail, directory: string): PaperExperimentTrades {
+  if (detail.status === 'completed' || detail.status === 'interrupted') {
+    reconcileNautilusPaperOutbox(detail, directory);
+  }
+  const expected = bindingFromDetail(detail);
+  const db = openReadOnly(directory, expected);
+  if (!db) return { groups: [], truncated: false, coverage: 'control_only' };
+  try {
+    const head = db.prepare("SELECT COUNT(*) AS n, COALESCE(MAX(seq), 0) AS last FROM nautilus_records WHERE type = 'fill'")
+      .get() as { n: number; last: number };
+    const key = `${head.n}:${head.last}`;
+    let cached = tradeCache.get(detail.id);
+    if (!cached || cached.key !== key) {
+      const rows = db.prepare(`SELECT seq,at,type,payload_json,payload_sha256 FROM nautilus_records
+        WHERE type = 'fill' ORDER BY seq DESC LIMIT ?`).all(MAX_GROUPED_FILLS) as Row[];
+      const fills = rows.reverse().map((row) => {
+        const message = checkedRow(row, expected);
+        if (message.type !== 'fill') throw new Error('Indexed Nautilus Paper fill differs.');
+        return fill(message);
+      });
+      cached = { key, fills };
+      tradeCache.set(detail.id, cached);
+    }
+    const panels = latestSnapshot(db, expected)?.panels ?? [];
+    const { groups, truncated } = groupTrades(cached.fills, panels, detail.params?.pairs);
+    return { groups, truncated: truncated || head.n > MAX_GROUPED_FILLS, coverage: 'durable_journal' };
+  } finally { db.close(); }
 }
 
 /** Read all fills by stable append sequence, with no fabricated trades on error. */

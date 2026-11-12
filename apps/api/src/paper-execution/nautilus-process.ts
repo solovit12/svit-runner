@@ -33,6 +33,23 @@ export function isFatalNautilusLogLine(line: string, live = false): boolean {
   return /\[ERROR\]|InvalidStateTrigger|Traceback \(most recent call last\)/.test(line);
 }
 
+/** A run's child that has sent nothing for this long is dead: the run stops. */
+export const CHILD_SILENCE_MS = 60_000;
+/** A watchdog tick this late means this API process itself was busy (2026-11-12: a 132 s synchronous request). */
+export const API_STALL_MS = 5_000;
+
+/**
+ * The watchdog of one run's Nautilus child, called on every tick of the run's interval. True when the child has been
+ * silent too long. While this API process is blocked its children's lines wait unread in their pipes, and the first
+ * tick after the block runs before they are read: that silence is ours, not the child's, so a late tick restarts the
+ * clock instead of stopping every run at once.
+ */
+export function childSilent(watch: { lastMessageAt: number; lastTickAt: number }, now: number): boolean {
+  if (now - watch.lastTickAt > API_STALL_MS) watch.lastMessageAt = Math.max(watch.lastMessageAt, now);
+  watch.lastTickAt = now;
+  return now - watch.lastMessageAt > CHILD_SILENCE_MS;
+}
+
 /** Experiment ids whose Nautilus process is owned by a live actor of this API (any factory). */
 export const ownedNautilusRuns = new Set<string>();
 

@@ -12,7 +12,8 @@ import type {
 } from '../../../../packages/shared/src/strategy-catalog-contracts';
 import type {
   CreateLiveAccountRequest, LiveAccountFees, LiveAccountView, LiveAccountsView, LiveConnectionCheck, PaperExperimentActivity,
-  PaperExperimentCapabilities, PaperExperimentDetail, PaperExperimentSummary, StartPaperExperimentRequest, UpdateLiveAccountRequest,
+  PaperExperimentCapabilities, PaperExperimentDetail, PaperExperimentSummary, PaperExperimentTrades, StartPaperExperimentRequest,
+  UpdateLiveAccountRequest,
 } from '../../../../packages/shared/src/paper-experiment-contracts';
 import type {
   BacktestReport, ReportSettingsView, SheetRowResult, TelegramBacktestPost, TelegramPostResult,
@@ -20,7 +21,8 @@ import type {
 
 export type PaperCapabilities = PaperExperimentCapabilities;
 export type CreatePaperExperimentInput = StartPaperExperimentRequest;
-export type { PaperExperimentActivity, PaperExperimentDetail, PaperExperimentSummary, PaperExperimentStatus, PaperExperimentTrack } from '../../../../packages/shared/src/paper-experiment-contracts';
+export type { PaperExperimentActivity, PaperExperimentDetail, PaperExperimentSummary, PaperExperimentStatus, PaperExperimentTrack,
+  PaperExperimentTrades, PaperStrategyPanel, PaperTradeGroup } from '../../../../packages/shared/src/paper-experiment-contracts';
 
 export class ApiResponseError extends Error {
   constructor(
@@ -245,6 +247,19 @@ export async function loadPaperExperimentActivity(
     `/api/paper-experiments/${encodeURIComponent(id)}/activity${suffix}`, { signal },
   ));
   return result.activity;
+}
+
+/** The run's fills grouped by position (entry to flat) and by the legs opened together (a pair). */
+export async function loadPaperExperimentTrades(id: string, signal?: AbortSignal): Promise<PaperExperimentTrades> {
+  const result = await parse<{ trades: PaperExperimentTrades }>(await apiFetch(
+    `/api/paper-experiments/${encodeURIComponent(id)}/trades`, { signal },
+  ));
+  return result.trades;
+}
+
+/** Deletes a finished run and its data on the server for good. */
+export async function deletePaperExperiment(id: string): Promise<void> {
+  await parse<{ deleted: string }>(await apiFetch(`/api/paper-experiments/${encodeURIComponent(id)}`, { method: 'DELETE' }));
 }
 
 export async function stopPaperExperiment(id: string): Promise<PaperExperimentDetail> {

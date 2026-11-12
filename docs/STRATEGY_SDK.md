@@ -46,7 +46,7 @@ During warm-up `ctx.is_history` is true and orders are ignored: runs start flat.
 
 | Call | Meaning |
 | --- | --- |
-| `ctx.entry(id, "long"/"short", limit=, stop=, size=1.0, oca=, ioc=False)` | Open or reverse. Market without limit/stop; `size` scales the Paper order size. `ioc=True` (with `limit`): immediate-or-cancel, see below. |
+| `ctx.entry(id, "long"/"short", limit=, stop=, size=1.0, usdc=, oca=, ioc=False)` | Open or reverse. Market without limit/stop; `size` scales the Paper order size; `usdc=2000` sets the amount itself (USDC at the order's price, whatever the account and Order size; Live: Max position, the leverage limit and the exchange's minimum still apply). `ioc=True` (with `limit`): immediate-or-cancel, see below. |
 | `ctx.exit(id, from_entry, limit=, stop=, profit_ticks=, loss_ticks=, profit_percent=, loss_percent=, profit_type="limit", trail_points_ticks=, trail_price=, trail_offset_ticks=, qty_percent=)` | Take-profit / stop-loss / trailing for each trade of the entry, priced from its real average entry and attached the moment it fills. `profit_type="market"`: the take-profit is a trigger like the stop (market order 300 ms after the price reaches it). |
 | `ctx.close(entry_id=None, qty_percent=100)`, `ctx.close_all()` | Close at market. |
 | `ctx.cancel(id)`, `ctx.cancel_all()` | Remove working orders. |
@@ -57,9 +57,20 @@ Read-only: `ctx.position`, `ctx.position_avg_price`, `ctx.trades`, `ctx.orders`,
 `ctx.venue`, `ctx.now_ms`; `ctx.state` is a dict for your own data; `ctx.log(text)` writes to
 the run journal. Prices may be given as `Decimal` or strings to keep them exact.
 
-Class attributes: `timeframe`, `warmup_bars`, `pyramiding`, `uses_trades`, and `max_positions_per_venue`
+`ctx.status(key, title, markets=[...], lines=[...], progress={...})` shows a small panel on the run
+page under Open positions (`title=None` removes it); it goes out with the account snapshot (every
+5 s while positions are open, else 15 s). `progress` = `{"label", "value", "target", "unit"}` plus
+optional `"left_percent"`, `"left_usd"`, `"usd"`: a bar of value / target, e.g. a pair's gain toward
+its take-profit with the price move and the money still to come. `markets` names the markets the
+panel is about: the page's "Trades by position" groups their positions together (a pair). At most
+8 panels per market, 6 lines of 200 characters; call it at most about once a second.
+
+Class attributes: `timeframe`, `warmup_bars`, `pyramiding`, `uses_trades`, `max_positions_per_venue`
 (at most this many markets of one exchange hold a position at once; an entry beyond it is
-rejected with `position_limit`).
+rejected with `position_limit`), and `exchange_take_profit` (Live, for hedged legs such as a pair:
+besides the reduce-only exchange-side stop, each position gets a reduce-only take-profit the run's
+Exchange stop % on the other side of its entry, so a move of both legs together closes both on the
+exchange even when the server is down; either one executing while the run works halts the run).
 
 ### Immediate-or-cancel entries
 

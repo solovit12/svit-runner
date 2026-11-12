@@ -78,8 +78,18 @@ export const VenueSharedPaperStrategySettingsV2Schema = z.object({
  * HIP-3 markets carry their deployer's prefix, e.g. `xyz:NVDA`.
  */
 export const PAPER_MARKET_SYMBOL_PATTERN = /^(?:[a-z][a-z0-9]{0,7}:)?[A-Za-z0-9]{1,20}$/;
-/** HIP-3 deployers (perp DEXs) whose markets Paper lists next to Hyperliquid's own. */
-export const HYPERLIQUID_HIP3_DEXES = ['xyz'] as const;
+/**
+ * HIP-3 deployers (perp DEXs, all with USDC collateral) whose markets Paper and backtests list next to Hyperliquid's
+ * own: xyz (XYZ: stocks, indices, commodities), io (EntropyIO: pre-IPO such as io:ANTH / io:OAI, stocks) and para
+ * (Paragon: stocks, indices, rates; para:ANTH).
+ */
+export const HYPERLIQUID_HIP3_DEXES = ['xyz', 'io', 'para'] as const;
+/** Names of the HIP-3 deployers for the market lists. */
+export const HYPERLIQUID_HIP3_DEX_LABELS: Readonly<Record<typeof HYPERLIQUID_HIP3_DEXES[number], string>> = {
+  xyz: 'XYZ: stocks, indices, commodities',
+  io: 'EntropyIO: pre-IPO companies, stocks',
+  para: 'Paragon: stocks, indices, rates',
+};
 
 /** `xyz` for `xyz:NVDA`; null for a venue's own market. */
 export function hip3Dex(market: string): string | null {

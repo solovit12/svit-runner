@@ -54,6 +54,10 @@ class DipBuyer(Strategy):
         ctx.log(f"strategy saw {fill.category} {fill.qty} @ {fill.price} ({fill.leg})")
         if fill.category == "exit":
             ctx.state["done"] = True
+            ctx.status("dip", None)
+        else:
+            ctx.status("dip", "Dip buyer: long", markets=[ctx.market], lines=[f"entry {fill.price}"],
+                       progress={"label": "to take-profit", "value": 0, "target": 1.2, "unit": "%"})
 """
 
 
@@ -151,6 +155,8 @@ async def ioc_scenario():
             assert position["side"] == "long" and Decimal(position["avgEntryPrice"]) == Decimal("98.95"), position
             assert Decimal(position["unrealizedPnl"]) == ((Decimal(position["markPrice"]) - Decimal("98.95")) * 2).quantize(Decimal("1e-8")), position
             assert position["openedAt"].endswith("Z"), position
+            [panel] = snapshot["panels"]
+            assert panel["key"] == "dip" and panel["markets"] == ["SOL"] and panel["progress"]["target"] == 1.2, panel
             take_profit = Decimal("98.95") * Decimal("1.012")  # 100.1374, reached by the bid
             await run.prices(("100.14", "100.20"))
             await run.wait(lambda: run.fills("exit"), "market take-profit")

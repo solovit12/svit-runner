@@ -95,6 +95,8 @@ class ExecRequest:
     reference_price: Decimal | None = None
     # Multiplier of the configured entry size (Python strategies may scale entries).
     size_scale: Decimal = Decimal(1)
+    # Python strategies: the entry's amount in USDC at its price, instead of the configured percent.
+    notional: Decimal | None = None
     # Immediate-or-cancel entry (Python SDK): one attempt at arrival, never rests.
     ioc: bool = False
     # Book source time the execution must not predate (0: any fresh book).
@@ -196,7 +198,7 @@ class PineOrderManager:
         return (order["category"],) + tuple((name, order.get(name)) for name in (
             *(() if order["category"] == "exit" else ("side",)),
             "type", "limit", "stop", "profitTicks", "lossTicks", "trailPrice",
-            "trailPointsTicks", "trailOffsetTicks", "fromEntry", "sizeScale", "qtyPercent",
+            "trailPointsTicks", "trailOffsetTicks", "fromEntry", "sizeScale", "notionalUsdc", "qtyPercent",
             "profitPercent", "lossPercent", "profitType", "tif"))
 
     def _parse_order(self, raw):
@@ -217,8 +219,11 @@ class PineOrderManager:
                  "oca": raw.get("oca"), "fromEntry": raw.get("fromEntry"),
                  "profitType": raw.get("profitType") or "limit", "tif": raw.get("tif") or "gtc"}
         for name in ("limit", "stop", "profitTicks", "lossTicks", "trailPrice", "trailPointsTicks",
-                     "trailOffsetTicks", "qtyCap", "qtyPercent", "sizeScale", "profitPercent", "lossPercent"):
+                     "trailOffsetTicks", "qtyCap", "qtyPercent", "sizeScale", "notionalUsdc", "profitPercent",
+                     "lossPercent"):
             order[name] = dec(raw.get(name), f"{order_id}.{name}")
+        if order["notionalUsdc"] is not None and (category != "entry" or order["notionalUsdc"] <= 0):
+            raise ValueError(f"order {order_id}: notionalUsdc must be a positive amount of an entry")
         if order["profitType"] not in ("limit", "market"):
             raise ValueError(f"order {order_id}: profitType must be limit or market")
         if order["tif"] not in ("gtc", "ioc") or (order["tif"] == "ioc" and (category, kind) != ("entry", "limit")):
@@ -469,6 +474,7 @@ class PineOrderManager:
         request = ExecRequest(f"{self.track}:{self.request_seq}", leg.key, order["category"], side, limit,
                               real_close, open_side, reduce_only=order["category"] == "exit" and open_side is None,
                               reference_price=reference, size_scale=order.get("sizeScale") or Decimal(1),
+                              notional=order.get("notionalUsdc"),
                               ioc=ioc, source_ns=leg.source_ns if (ioc or leg.state == "triggered") else 0,
                               created_ms=now_ms)
         leg.state, leg.request_id = "executing", request.id

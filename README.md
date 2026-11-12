@@ -159,7 +159,7 @@ rules and costs?* It does not predict future profit.
 
 | Field | Meaning |
 |---|---|
-| Exchange, market | Binance Futures: a USDⓈ-M perpetual (for example `BTCUSDT`; compare on TradingView with `BINANCE:BTCUSDT.P`). Hyperliquid: a main perpetual (`BTC`, `HYPE`) or an XYZ market (`xyz:SP500`, `xyz:NVDA`), settled in USDC. |
+| Exchange, market | Binance Futures: a USDⓈ-M perpetual (for example `BTCUSDT`; compare on TradingView with `BINANCE:BTCUSDT.P`). Hyperliquid: a main perpetual (`BTC`, `HYPE`) or a HIP-3 market of XYZ (`xyz:SP500`, `xyz:NVDA`), EntropyIO (`io:ANTH`) or Paragon (`para:ANTH`), settled in USDC. |
 | Timeframe | `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`. The strategy calculates on closed bars of this timeframe. |
 | From / To | UTC dates. *From* starts at 00:00 UTC, *To* is included whole. No hidden warm-up: an SMA of 200 has no full value on the first 199 bars. |
 | Initial capital, order size, pyramiding | Override the values in `strategy(...)`, like TradingView's *Properties* tab. Order size: fixed quantity, cash amount or percent of equity. |
@@ -218,9 +218,10 @@ executed against the live order book with virtual money.
 | Order size | Percent of that exchange's virtual balance per entry. |
 | Fees | Maker and taker percent per exchange, prefilled with each exchange's public base fees (Hyperliquid 0.015 % / 0.045 %, Lighter 0 % / 0 %), editable. |
 
-**Hyperliquid `xyz:` markets** (stocks, indices, commodities by trade.xyz) each pay their own fee,
-shown as a multiple of the Hyperliquid fee, and trade thinly while their home exchange is closed —
-the form warns about this.
+**Hyperliquid's HIP-3 markets** — `xyz:` (stocks, indices, commodities by trade.xyz), `io:` (EntropyIO:
+pre-IPO companies such as `io:ANTH`, `io:OAI`, and stocks) and `para:` (Paragon: stocks, indices, rates) —
+each pay their own fee, shown as a multiple of the Hyperliquid fee, and trade thinly while their home
+exchange is closed — the form warns about this for `xyz:`.
 
 ### How orders execute in Paper
 
@@ -367,13 +368,17 @@ The complete reference is [`docs/STRATEGY_SDK.md`](docs/STRATEGY_SDK.md).
 
 ## Runs: watching a run
 
-The **Runs** page (top menu) lists every run, Paper and LIVE, running and finished, with each exchange's **Total PnL** right after the status. Open one to see:
+The **Runs** page (top menu, address `/runs`; old `/paper` links still open it) lists every run, Paper and LIVE, running and finished, with each exchange's **Total PnL** right after the status. **Delete** (finished runs) removes a run and all its data from your server after an "are you sure"; it cannot be undone. Open one to see:
 
 - **Status** and the run's rules (timeframe, markets, balances, order size, fees, LIVE limits).
 - **Open positions** per exchange: size, average entry, mark price, unrealized PnL, leverage; the
   exchange balance, realized PnL and total PnL from the start.
 - **Events**: start, data problems and recovery, LIVE safety actions, stop.
-- **Trades**: every fill (entries and exits separately), 20 per page, with fees and realized PnL.
+- **Strategy panels** under Open positions, when a Python strategy shows them (`ctx.status`): for
+  example each pair's way to its take-profit, with the price move and the money still to come.
+- **Trades by position**: each market's position from its first entry until it is flat again (entry,
+  exit, result), the legs opened together (a pair) grouped with their sum; every single fill below it
+  under **All fills**, 20 per page, with fees and realized PnL.
 - **Stop experiment** (Paper) or **Stop and close all** (LIVE) ends the run.
 
 ### What happens when the computer or Docker restarts

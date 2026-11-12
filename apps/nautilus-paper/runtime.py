@@ -67,6 +67,7 @@ REVIVE_DELAYS_MS = (10_000, 30_000, 60_000, 300_000)
 # Runs now continue across UTC days; bound per-run journal growth instead.
 OUTBOX_CAP_BYTES = 512 * 1024 * 1024
 SNAPSHOT_IDLE_MS = 15_000
+MAX_SNAPSHOT_PANELS = 16  # status panels of Python strategies per snapshot (the API accepts at most this many)
 
 
 def require_fast_book_support():
@@ -258,6 +259,10 @@ LIVE_SAFETY_LOST_GRACE_S = 2.0
 LIVE_POSITION_CHECK_S = 10
 LIVE_POSITION_MISMATCHES_TO_HALT = 2
 LIVE_ORDER_NO_ANSWER_S = 30
+# The exchange-side protection of an open Live position: always a reduce-only stop; for strategies with
+# hedged legs (Strategy.exchange_take_profit) also a reduce-only take-profit the same distance on the other side.
+SAFETY_ATTRS = {"stop": "safety", "tp": "safety_tp"}
+SAFETY_LABELS = {"stop": "stop", "tp": "take-profit"}
 
 LIVE_REFUSAL_PAUSE_MS = 1_000
 LIVE_RATE_LIMIT_PAUSE_MS = 30_000
@@ -486,10 +491,14 @@ class PineTrackStrategy(TrackStrategy):
         # close the position when a Live run stops, and how many position checks in a row found the
         # exchange's position different.
         self.safety = None
+        self.safety_tp = None  # strategies with hedged legs: the exchange-side take-profit (SAFETY_ATTRS)
         self.safety_replaced = set()
-        self.safety_lost_at = -LIVE_SAFETY_LOST_REPEAT_S  # monotonic time Lighter last removed it itself
-        self.safety_cap_step = 0  # index in safety_slippage_bps(): narrower after Lighter's 21735
-        self.safety_lost_pending = None  # {"lost", "at"}: removed by Lighter, judged after the grace
+        self.safety_kind_of = {}  # order id -> "stop" | "tp" for every exchange-side order of this track
+        # Per kind: monotonic time the exchange last removed it itself; index in safety_slippage_bps()
+        # (narrower after Lighter's 21735); {"lost", "at"} when the exchange removed it, judged after the grace.
+        self.safety_lost_at = {kind: -LIVE_SAFETY_LOST_REPEAT_S for kind in SAFETY_ATTRS}
+        self.safety_cap_step = {kind: 0 for kind in SAFETY_ATTRS}
+        self.safety_lost_pending = {kind: None for kind in SAFETY_ATTRS}
         self.flatten_ids = set()
         self.flatten_open = {}  # close order id -> {"qty", "filled", "sent"} while it has no final answer
         self.flatten_answered_at = 0.0
@@ -691,7 +700,8 @@ class PineTrackStrategy(TrackStrategy):
             open_qty, reason = self._live_caps(open_qty, close_qty, side, price_ref, instrument, reason)
         elif request.open_side is not None:
             cash = self.controller.venue_cash(self)
-            target = cash * Decimal(self.run_config["orderSizePercent"]) / Decimal("100") * request.size_scale
+            target = (request.notional if request.notional is not None   # a Python entry with its own USDC amount
+                      else cash * Decimal(self.run_config["orderSizePercent"]) / Decimal("100") * request.size_scale)
             if self.controller.live is None:
                 # Paper: positions together never exceed the virtual balance. Live is bound by the
                 # account leverage limit instead (_live_caps) and the exchange's own margin.
@@ -826,14 +836,15 @@ class PineTrackStrategy(TrackStrategy):
             self._try_orders(now_ms())
 
     def _safety_fill(self, event):
-        """The exchange-side stop executed while the engine runs: its own stop did not close first.
-        Booked, the strategy's position follows, and the run halts (owner decision 2026-10-15)."""
+        """The exchange-side stop (or take-profit) executed while the engine runs: its own exits did not
+        close first. Booked, the strategy's position follows, and the run halts (owner decision 2026-10-15)."""
+        label = SAFETY_LABELS[self.safety_kind_of.get(str(event.client_order_id), "stop")]
         qty, buy = Decimal(str(event.last_qty)), event.order_side == OrderSide.BUY
         before = self.position
         closing = min(qty, abs(before)) if before != 0 and (before < 0) == buy else Decimal("0")
         self._book_fill(event)
         self.manager.late_fill("buy" if buy else "sell", closing, qty - closing)
-        self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: the exchange-side stop executed on {self.xname} at {event.last_px}; "
+        self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: the exchange-side {label} executed on {self.xname} at {event.last_px}; "
                                   "the run stops and closes everything")
 
     def _book_fill(self, event):
@@ -905,14 +916,16 @@ class PineTrackStrategy(TrackStrategy):
         if self._is_safety(order_id):
             removed_by_us = order_id in self.safety_replaced
             self.safety_replaced.discard(order_id)
-            lost = self.safety if self.safety is not None and order_id == self.safety["id"] else None
-            if lost is not None:
-                self.safety = None
-            self.controller.event(self.spec.key, f"exchange-side stop {order_id} removed from {self.xname}")
-            if not removed_by_us and not self.controller.stopping and self.position != 0:
+            kind = self._safety_of(order_id)
+            lost = getattr(self, SAFETY_ATTRS[kind]) if kind else None
+            if kind:
+                setattr(self, SAFETY_ATTRS[kind], None)
+            label = SAFETY_LABELS[self.safety_kind_of.get(order_id, "stop")]
+            self.controller.event(self.spec.key, f"exchange-side {label} {order_id} removed from {self.xname}")
+            if kind and not removed_by_us and not self.controller.stopping and self.position != 0:
                 # Lighter removes it when the position closes too, and that cancel can come just before
                 # the closing fill: decided after LIVE_SAFETY_LOST_GRACE_S (RuntimeController.check_live_orders).
-                self.safety_lost_pending = {"lost": lost, "at": time.monotonic()}
+                self.safety_lost_pending[kind] = {"lost": lost, "at": time.monotonic()}
             return
         if order_id in self.flatten_ids:
             close = self.flatten_open.get(order_id)
@@ -966,8 +979,9 @@ class PineTrackStrategy(TrackStrategy):
             return
         elapsed = (time.perf_counter_ns() - sent) / 1_000_000
         safety = self._is_safety(order_id)
-        if safety and stage == "accepted" and self.safety is not None and order_id == self.safety["id"]:
-            self.safety["accepted"] = True
+        kind = self._safety_of(order_id)
+        if safety and stage == "accepted" and kind:
+            getattr(self, SAFETY_ATTRS[kind])["accepted"] = True
         if stage != "accepted" or safety:
             # A resting stop's later fill or cancel says nothing about speed.
             self.sent_ns.pop(order_id, None)
@@ -1052,7 +1066,19 @@ class PineTrackStrategy(TrackStrategy):
         return max(state["requested"] - state["close"] - state["filled"], Decimal("0")) * self.live_mark()
 
     def _is_safety(self, order_id):
-        return (self.safety is not None and order_id == self.safety["id"]) or order_id in self.safety_replaced
+        return self._safety_of(order_id) is not None or order_id in self.safety_replaced
+
+    def _safety_of(self, order_id):
+        """"stop" or "tp" when `order_id` is the current exchange-side order of that kind, else None."""
+        for kind, attr in SAFETY_ATTRS.items():
+            current = getattr(self, attr)
+            if current is not None and current["id"] == order_id:
+                return kind
+        return None
+
+    def wants_exchange_take_profit(self):
+        """The strategy's positions are hedged legs (Strategy.exchange_take_profit): a bracket on the exchange."""
+        return bool(getattr(self.run_config.get("strategyClass"), "exchange_take_profit", False))
 
     def _safety_trigger(self):
         """Trigger price of the exchange-side stop: N % beyond the strategy's farthest stop (or the
@@ -1070,36 +1096,57 @@ class PineTrackStrategy(TrackStrategy):
         buffer = Decimal(live["exchangeStopPercent"])
         return level * (1 - buffer / 100) if long else level * (1 + buffer / 100)
 
+    def _safety_tp_trigger(self):
+        """Trigger price of the exchange-side take-profit: the Exchange stop % on the other side of the
+        average entry (hedged legs: when both legs move together, one leg's stop and the other's
+        take-profit fire at about the same time)."""
+        buffer = Decimal(self.controller.live["exchangeStopPercent"])
+        return self.avg_open * (1 + buffer / 100) if self.position > 0 else self.avg_open * (1 - buffer / 100)
+
     def _sync_safety_stop(self):
-        """Keep one reduce-only STOP_MARKET on Lighter for the whole open position. It is placed again
-        only when the position's size changes (it does not follow a trailing stop)."""
+        """Keep the exchange-side protection of the whole open position: one reduce-only STOP_MARKET, and
+        for strategies with hedged legs also one reduce-only MARKET_IF_TOUCHED take-profit. Each is placed
+        again only when the position's size changes (it does not follow a trailing stop)."""
+        self._sync_safety("stop")
+        if self.wants_exchange_take_profit():
+            self._sync_safety("tp")
+
+    def _sync_safety(self, kind):
         instrument = self._instrument()
         qty = self._step(abs(self.position))
-        current = self.safety
+        attr = SAFETY_ATTRS[kind]
+        current = getattr(self, attr)
         if current is not None and current["qty"] == qty:
             return
         if qty <= 0:
             self._cancel_safety()
             return
-        # Rounded away from the market: a sell stop down, a buy stop up.
-        trigger = outward_price(self._safety_trigger(), instrument.price_increment, "buy" if self.position > 0 else "sell")
-        side = OrderSide.SELL if self.position > 0 else OrderSide.BUY
-        order = self.order_factory.stop_market(
-            self.exec_id, side, Quantity.from_str(f"{qty:.{instrument.size_precision}f}"),
-            instrument.make_price(float(trigger)), time_in_force=TimeInForce.GTC, reduce_only=True)
-        self.safety = {"id": str(order.client_order_id), "qty": qty, "trigger": trigger,
-                       "sent_ns": time.perf_counter_ns(), "accepted": False}
-        bps = self.safety_slippage_bps()[self.safety_cap_step]
+        long = self.position > 0
+        side = OrderSide.SELL if long else OrderSide.BUY
+        if kind == "stop":
+            # Rounded away from the market: a sell stop down, a buy stop up.
+            trigger = outward_price(self._safety_trigger(), instrument.price_increment, "buy" if long else "sell")
+            make = self.order_factory.stop_market
+        else:
+            # Rounded away from the market: a sell take-profit up, a buy take-profit down.
+            trigger = outward_price(self._safety_tp_trigger(), instrument.price_increment, "sell" if long else "buy")
+            make = self.order_factory.market_if_touched
+        order = make(self.exec_id, side, Quantity.from_str(f"{qty:.{instrument.size_precision}f}"),
+                     instrument.make_price(float(trigger)), time_in_force=TimeInForce.GTC, reduce_only=True)
+        setattr(self, attr, {"id": str(order.client_order_id), "qty": qty, "trigger": trigger,
+                             "sent_ns": time.perf_counter_ns(), "accepted": False})
+        self.safety_kind_of[str(order.client_order_id)] = kind
+        bps = self.safety_slippage_bps()[self.safety_cap_step[kind]]
         if side == OrderSide.SELL:
             bps = self.live_sell_bps(qty, trigger, bps)
         self.submit_order(order, params={"market_order_slippage_bps": bps})
         self._mark_sent(order)
         if current is not None:
-            # The new stop is placed before the old one is removed: the position is never unprotected.
+            # The new order is placed before the old one is removed: the position is never unprotected.
             # Both are reduce-only, so together they can never close more than the position.
             self._cancel_safety_order(current)
-        self.controller.event(self.spec.key, f"exchange-side stop on {self.xname}: {side.name.lower()} {qty} {self.spec.market} "
-                              f"if price reaches {trigger} (reduce-only)")
+        self.controller.event(self.spec.key, f"exchange-side {SAFETY_LABELS[kind]} on {self.xname}: {side.name.lower()} {qty} "
+                              f"{self.spec.market} if price reaches {trigger} (reduce-only)")
 
     def safety_slippage_bps(self):
         """The exchange-side stop's caps: Max slippage, then narrower ones if Lighter refuses it (21735)."""
@@ -1107,14 +1154,16 @@ class PineTrackStrategy(TrackStrategy):
         return (bps, *(step for step in self.controller.live_venues[self.spec.venue_key].stop_fallback_bps if step < bps))
 
     def judge_lost_safety(self, at):
-        """After the grace: a stop Lighter removed matters only if the position is still open unprotected."""
-        pending = self.safety_lost_pending
-        if pending is None or at - pending["at"] < LIVE_SAFETY_LOST_GRACE_S:
-            return
-        self.safety_lost_pending = None
-        if self.position == 0 or self.safety is not None or self.controller.stopping:
-            return  # the position closed (the cancel came first) or it already has a new stop
-        self._safety_lost(pending["lost"])
+        """After the grace: an exchange-side order the exchange removed matters only if the position is
+        still open without it."""
+        for kind, attr in SAFETY_ATTRS.items():
+            pending = self.safety_lost_pending[kind]
+            if pending is None or at - pending["at"] < LIVE_SAFETY_LOST_GRACE_S:
+                continue
+            self.safety_lost_pending[kind] = None
+            if self.position == 0 or getattr(self, attr) is not None or self.controller.stopping:
+                continue  # the position closed (the cancel came first) or it already has a new one
+            self._safety_lost(kind, pending["lost"])
 
     def _order_transition(self, name, event):
         super()._order_transition(name, event)
@@ -1123,28 +1172,37 @@ class PineTrackStrategy(TrackStrategy):
             # order): cancel it now.
             self.cancel_order(event.client_order_id)
 
-    def _safety_lost(self, lost):
-        """Lighter removed the exchange-side stop itself while the position is open."""
+    def _safety_lost(self, kind, lost):
+        """The exchange removed an exchange-side stop or take-profit itself while the position is open."""
         quote = self.last_quote
-        crossed = quote is None or lost is None or (
-            Decimal(str(quote.bid_price)) <= lost["trigger"] if self.position > 0
-            else Decimal(str(quote.ask_price)) >= lost["trigger"])
+        long = self.position > 0
+        if quote is None or lost is None:
+            crossed = True
+        elif kind == "stop":
+            crossed = (Decimal(str(quote.bid_price)) <= lost["trigger"] if long
+                       else Decimal(str(quote.ask_price)) >= lost["trigger"])
+        else:
+            crossed = (Decimal(str(quote.bid_price)) >= lost["trigger"] if long
+                       else Decimal(str(quote.ask_price)) <= lost["trigger"])
         at = time.monotonic()
-        repeated = at - self.safety_lost_at < LIVE_SAFETY_LOST_REPEAT_S
-        self.safety_lost_at = at
+        repeated = at - self.safety_lost_at[kind] < LIVE_SAFETY_LOST_REPEAT_S
+        self.safety_lost_at[kind] = at
         if crossed or repeated:
             # It triggered and was canceled (a gap past its price cap), or keeps disappearing: the
             # engine closes the position at market and stops instead of placing it again and again.
-            self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: {self.xname} canceled the exchange-side stop "
+            self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: {self.xname} canceled the exchange-side "
+                                      f"{SAFETY_LABELS[kind]} "
                                       + ("after the price reached it" if crossed else "twice within a minute")
                                       + "; the run closes the position at market and stops")
             return
         self._sync_safety_stop()  # e.g. its lifetime ended: the open position gets a new one
 
     def _cancel_safety(self):
-        current, self.safety = self.safety, None
-        if current is not None:
-            self._cancel_safety_order(current)
+        for attr in SAFETY_ATTRS.values():
+            current = getattr(self, attr)
+            setattr(self, attr, None)
+            if current is not None:
+                self._cancel_safety_order(current)
 
     def _cancel_safety_order(self, current):
         order = self.cache.order(ClientOrderId.from_str(current["id"]))
@@ -1170,18 +1228,20 @@ class PineTrackStrategy(TrackStrategy):
         order_id, reason = str(event.client_order_id), str(event.reason)
         if self._is_safety(order_id):
             self.safety_replaced.discard(order_id)
-            if self.safety is not None and order_id == self.safety["id"]:
+            kind = self._safety_of(order_id)
+            if kind:
                 # The position would stay without its exchange-side protection (owner decision 2026-10-15).
-                self.safety = None
+                setattr(self, SAFETY_ATTRS[kind], None)
+                label = SAFETY_LABELS[kind]
                 if (self.controller.live_venues[self.spec.venue_key].stop_cap_refused(reason)
-                        and self.safety_cap_step + 1 < len(self.safety_slippage_bps())
+                        and self.safety_cap_step[kind] + 1 < len(self.safety_slippage_bps())
                         and not self.controller.stopping):
-                    self.safety_cap_step += 1
-                    self.controller.event(self.spec.key, f"LIVE: {self.xname} finds the exchange-side stop's price cap too far "
-                                          f"from its trigger; placing it with {self.safety_slippage_bps()[self.safety_cap_step] / 100}%")
+                    self.safety_cap_step[kind] += 1
+                    self.controller.event(self.spec.key, f"LIVE: {self.xname} finds the exchange-side {label}'s price cap too far "
+                                          f"from its trigger; placing it with {self.safety_slippage_bps()[self.safety_cap_step[kind]] / 100}%")
                     self._sync_safety_stop()
                     return
-                self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: {self.xname} refused the exchange-side stop ({reason}); "
+                self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: {self.xname} refused the exchange-side {label} ({reason}); "
                                           "the run stops and closes everything")
             return
         if self.controller.live_venues[self.spec.venue_key].classify(reason, stage == "denied") == "miss":
@@ -1314,7 +1374,7 @@ class PineTrackStrategy(TrackStrategy):
             self.recovery_audit_blocker = "book_invalid"
             self.controller.record_invalid_book(self)
             return False
-        own = self.safety_replaced | ({self.safety["id"]} if self.safety else set())
+        own = self.safety_replaced | {getattr(self, attr)["id"] for attr in SAFETY_ATTRS.values() if getattr(self, attr)}
         if any(str(order.client_order_id) not in own for order in self.cache.orders_open(instrument_id=self.exec_id)):
             if self.controller.live is not None:
                 self.recovery_audit_blocker = "foreign_order"
@@ -1536,7 +1596,9 @@ class RuntimeController:
                                   f"account leverage {self.live['maxLeverage']}x, exchange-side stop "
                                   f"{self.live['exchangeStopPercent']}% from the "
                                   f"{self.live['exchangeStopFrom'].replace('_', ' ')}, "
-                                  f"max slippage {self.live['maxSlippagePercent']}%, "
+                                  + (f"exchange-side take-profit {self.live['exchangeStopPercent']}% from the entry price "
+                                     "(hedged legs), " if strategy.wants_exchange_take_profit() else "")
+                                  + f"max slippage {self.live['maxSlippagePercent']}%, "
                                   f"max position {self.live.get('maxPositionUsdc', 'off')}"
                                   f"{' USDC' if self.live.get('maxPositionUsdc') else ''}, "
                                   f"daily loss limit {f'{loss}%' if loss else 'off'}")
@@ -1744,11 +1806,12 @@ class RuntimeController:
                 strategy.judge_lost_safety(at)
                 if self.stopping:
                     return
-            safety = getattr(strategy, "safety", None)
-            if safety and not safety["accepted"] and at_ns - safety["sent_ns"] > LIVE_ORDER_NO_ANSWER_S * 1_000_000_000:
-                self.live_halt_on(strategy.spec.venue_key, f"{strategy.spec.market}: {self.live_venues[strategy.spec.venue_key].display} has not confirmed the exchange-side stop for "
-                               f"{LIVE_ORDER_NO_ANSWER_S} s; the run stops and closes everything")
-                return
+            for kind, attr in SAFETY_ATTRS.items():
+                safety = getattr(strategy, attr, None)
+                if safety and not safety["accepted"] and at_ns - safety["sent_ns"] > LIVE_ORDER_NO_ANSWER_S * 1_000_000_000:
+                    self.live_halt_on(strategy.spec.venue_key, f"{strategy.spec.market}: {self.live_venues[strategy.spec.venue_key].display} has not confirmed the exchange-side "
+                                   f"{SAFETY_LABELS[kind]} for {LIVE_ORDER_NO_ANSWER_S} s; the run stops and closes everything")
+                    return
             since = getattr(strategy, "unconfirmed_since_ms", None)
             if since is not None and at_ms - since > LIVE_UNCONFIRMED_MAX_MS:
                 self.live_halt_on(strategy.spec.venue_key, f"{strategy.spec.market}: {self.live_venues[strategy.spec.venue_key].display} did not confirm the position after an order of unknown "
@@ -2338,6 +2401,14 @@ class RuntimeController:
                 "positions": [position for row in rows for position in row["positions"]]})
         # Legacy HYPE-only clients/tests accept the original envelope unchanged.
         extra = {"tracks": tracks} if self.config.get("tracks") else {}
+        # Python strategies' status panels (ctx.status); both legs of a pair may show the same key: the newest wins.
+        panels = {}
+        for strategy in self.strategies.values():
+            for panel in getattr(getattr(strategy, "runner", None), "panels", {}).values():
+                if panel["key"] not in panels or panel["at"] >= panels[panel["key"]]["at"]:
+                    panels[panel["key"]] = panel
+        if panels:
+            extra["panels"] = [panels[key] for key in sorted(panels)][:MAX_SNAPSHOT_PANELS]
         self.emitter.emit("snapshot", stage=self.stage, accounts=accounts, **extra)
 
     def strategy_bars(self, item, live):
@@ -2532,7 +2603,7 @@ async def monitor_stdin(controller, offline_sources):
                 elif command == "live_test_drop_safety" and controller.config["mode"] == "offline" and controller.live:
                     # Offline test: the stand-in exchange removes the exchange-side stop on its own.
                     strategy = controller.strategies[track_key(item.get("venue", "lighter"), str(item["market"]))]
-                    strategy.cancel_order(ClientOrderId.from_str(strategy.safety["id"]))
+                    strategy.cancel_order(ClientOrderId.from_str(getattr(strategy, SAFETY_ATTRS[item.get("kind", "stop")])["id"]))
                 elif command == "live_test_hold_fill" and controller.config["mode"] == "offline" and controller.live:
                     controller.strategies[track_key(item.get("venue", "lighter"), str(item["market"]))].test_hold_fill = True
                 elif command == "trade" and controller.config["mode"] == "offline":

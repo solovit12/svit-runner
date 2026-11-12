@@ -18,8 +18,50 @@ MAX_BARS = 5_000
 ENTRY_TYPES = ("market", "limit", "stop", "stop-limit")
 
 
+MAX_PANELS = 8
+
+
 class StrategyError(Exception):
     """A strategy callback failed; the run stops with this message."""
+
+
+def _text(value, limit):
+    text = str(value).strip()
+    if not text:
+        raise ValueError("status texts must not be empty")
+    return text[:limit]
+
+
+def _finite(value, name):
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValueError(f"status progress {name} must be a finite number")
+    return round(number, 6)
+
+
+def status_panel(key, title, markets, lines, progress, at_ms):
+    """A checked, size-limited panel (the API accepts exactly this shape)."""
+    if isinstance(markets, str) or isinstance(lines, str):
+        raise ValueError("status markets and lines are lists")
+    panel = {"key": _text(key, 80), "title": _text(title, 120), "at": int(at_ms),
+             "markets": [_text(market, 40) for market in list(markets)[:4]],
+             "lines": [_text(line, 200) for line in list(lines)[:6]]}
+    if progress is not None:
+        target = _finite(progress["target"], "target")
+        if target == 0:
+            raise ValueError("status progress target must not be zero")
+        panel["progress"] = {"label": _text(progress.get("label", "progress"), 60),
+                             "value": _finite(progress["value"], "value"), "target": target,
+                             "unit": str(progress.get("unit", ""))[:8]}
+        if progress.get("stop") is not None:
+            stop = _finite(progress["stop"], "stop")
+            if stop >= 0:
+                raise ValueError("status progress stop must be below zero")
+            panel["progress"]["stop"] = stop
+        for name, field in (("left_percent", "leftPercent"), ("left_usd", "leftUsd"), ("usd", "usd")):
+            if progress.get(name) is not None:
+                panel["progress"][field] = _finite(progress[name], name)
+    return panel
 
 
 class Context:
@@ -89,13 +131,29 @@ class Context:
     def log(self, message):
         self._runner.log(str(message)[:500])
 
+    def status(self, key, title=None, *, markets=(), lines=(), progress=None):
+        """Show a small panel on the run page (under Open positions); `title=None` removes it.
+
+        `markets`: the markets this panel is about (the page groups their trades together).
+        `progress`: {"label", "value", "target", "unit", optional "left_percent", "left_usd", "usd", "stop"}:
+        a bar of value / target, e.g. the gain so far toward a take-profit; `stop` (below zero, the same unit)
+        is where the trade closes at a loss: a negative value is drawn as the way to it. Panels go out with
+        the account snapshot (every 5 s while positions are open, otherwise every 15 s).
+        """
+        self._runner.set_status(key, None if title is None else status_panel(
+            key, title, markets, lines, progress, self._runner.now_ms))
+
     # ----- orders (Pine semantics) ----------------------------------------
 
-    def entry(self, order_id, side, *, limit=None, stop=None, size=1.0, oca=None, oca_type="cancel", ioc=False):
+    def entry(self, order_id, side, *, limit=None, stop=None, size=1.0, usdc=None, oca=None, oca_type="cancel",
+              ioc=False):
         """Open (or reverse into) a position, like strategy.entry.
 
         Market when neither limit nor stop is given. `size` scales the Paper
-        order size (1.0 = the configured percent of the account).
+        order size (1.0 = the configured percent of the account). `usdc` sets
+        the amount instead: this many USDC at the order's price, whatever the
+        account and the Order size (Live: Max position, the leverage limit and
+        the exchange's minimum still apply; Paper: the virtual balance).
 
         `ioc=True` (limit only) sends an immediate-or-cancel limit: it arrives
         after the order latency, takes what the book holds at the limit, and the
@@ -105,12 +163,15 @@ class Context:
             raise ValueError("side must be 'long' or 'short'")
         if not (0 < float(size) <= 100):
             raise ValueError("size must be a positive multiplier")
+        if usdc is not None and (float(size) != 1.0 or not 0 < float(usdc) <= 1_000_000_000):
+            raise ValueError("usdc must be a positive amount, and size left at 1.0")
         if ioc and (limit is None or stop is not None):
             raise ValueError("ioc entries need a limit and no stop")
         kind = "stop-limit" if limit is not None and stop is not None else "limit" if limit is not None \
             else "stop" if stop is not None else "market"
         self._runner.place({"id": self._id(order_id), "category": "entry", "type": kind, "side": side,
                             "limit": _num(limit), "stop": _num(stop), "sizeScale": float(size),
+                            "notionalUsdc": _num(usdc),
                             "tif": "ioc" if ioc else None,
                             **({"oca": {"name": str(oca), "type": oca_type}} if oca else {})})
 
@@ -210,6 +271,14 @@ class StrategyRunner:
         self.fills = 0
         self.rejected = 0
         self.instrument = None  # set by the runtime from the venue instrument
+        self.panels = {}  # status key -> panel (ctx.status), sent with the account snapshot
+
+    def set_status(self, key, panel):
+        key = str(key).strip()[:80]
+        if panel is None:
+            self.panels.pop(key, None)
+        elif key in self.panels or len(self.panels) < MAX_PANELS:
+            self.panels[key] = panel
 
     # ----- strategy-facing order book --------------------------------------
 

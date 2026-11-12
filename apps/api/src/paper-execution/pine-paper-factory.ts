@@ -31,7 +31,8 @@ import type { PaperExperimentRuntimeFactory, PaperExperimentStopProof, PaperTrac
 import type { PaperExperimentSnapshot } from './paper-experiment-store.js';
 import { NautilusPaperLedger, type NautilusPaperMessageV1 } from './nautilus-paper-ledger.js';
 import {
-  NAUTILUS_FAST_PAPER_VERSION, NAUTILUS_PAPER_VERSION, assertNoLiveNautilusProcess, checkNautilusRuntime, isFatalNautilusLogLine, ownedNautilusRuns,
+  NAUTILUS_FAST_PAPER_VERSION, NAUTILUS_PAPER_VERSION, assertNoLiveNautilusProcess, checkNautilusRuntime, childSilent, isFatalNautilusLogLine,
+  ownedNautilusRuns,
 } from './nautilus-process.js';
 import { aggregateCandles, seriesSourcePlan, seriesWindow, type SeriesRequest } from '../../../../packages/pine-runtime/src/series-requests.js';
 import { PineLiveClient } from './pine-live-client.js';
@@ -169,6 +170,7 @@ interface Actor {
   logBytes: number;
   view: PaperExperimentRuntimeView;
   lastMessageAt: number;
+  lastTickAt: number;
 }
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 1600);
@@ -652,7 +654,7 @@ export function createPinePaperFactory(options: PinePaperFactoryOptions): PaperE
         cwd: options.projectRoot, env: settings.live ? liveEnv : env, stdio: ['pipe', 'pipe', 'pipe'],
       });
       attach(actor, child);
-      actor.lastMessageAt = now();
+      actor.lastMessageAt = actor.lastTickAt = now();
       if (actor.python) {
         // Warm-up bars (orders ignored), then the strategy starts flat.
         for (const { track, candles } of history) {
@@ -668,7 +670,7 @@ export function createPinePaperFactory(options: PinePaperFactoryOptions): PaperE
       }
       actor.timer = setInterval(() => {
         if (actor.stopping) return;
-        if (now() - actor.lastMessageAt > 60_000) return fail(actor, 'No Nautilus heartbeat for 60 seconds.');
+        if (childSilent(actor, now())) return fail(actor, 'No Nautilus heartbeat for 60 seconds.');
         if (!actor.loop) actor.loop = onBoundary(actor).finally(() => { actor.loop = null; });
       }, BOUNDARY_TICK_MS);
     } catch (error) { if (!actor.stopping) fail(actor, `Paper startup failed: ${message(error)}`); }
@@ -705,7 +707,7 @@ export function createPinePaperFactory(options: PinePaperFactoryOptions): PaperE
       const actor: Actor = {
         snapshot, settings, liveAccounts, python: pythonInfo, directory, ledger, report, abort: new AbortController(), child: null, childExit: null,
         exited: false, pine: null, tracks: [], startMs: 0, task: null, loop: null, timer: null, stopPromise: null,
-        stopping: false, failure: null, engineStopReason: null, seq: 0, childSeq: 0, logBytes: 0, lastMessageAt: now(),
+        stopping: false, failure: null, engineStopReason: null, seq: 0, childSeq: 0, logBytes: 0, lastMessageAt: now(), lastTickAt: now(),
         view: { engine: 'nautilus', stage: 'warming_up', fundingTreatment: 'excluded', observedAt: new Date().toISOString(), accounts: [] },
       };
       actors.set(snapshot.experimentId, actor);

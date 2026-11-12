@@ -1,10 +1,13 @@
 import { AlertTriangle, ArrowLeft, ArrowRight, Clock3, ShieldCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
-  listPaperExperiments, loadLiveAccounts, loadPaperCapabilities, loadPaperExperiment, loadPaperExperimentActivity, stopPaperExperiment,
+  deletePaperExperiment, listPaperExperiments, loadLiveAccounts, loadPaperCapabilities, loadPaperExperiment, loadPaperExperimentActivity,
+  loadPaperExperimentTrades, stopPaperExperiment,
   type PaperCapabilities, type PaperExperimentActivity, type PaperExperimentDetail, type PaperExperimentStatus,
-  type PaperExperimentSummary,
+  type PaperExperimentSummary, type PaperExperimentTrades,
 } from '../lib/api';
+import { PaperStrategyPanels, PaperTradeGroups } from './PaperRunTrades';
+import { runIdFromPath, runPath } from '../lib/run-paths';
 import { NativeRunNotice } from './NativeRunNotice';
 import { InfoTooltip } from './TranslatedText';
 import { XyzHoursNotice } from './XyzHoursNotice';
@@ -54,8 +57,86 @@ export function LiveStopOutcome({ detail }: { detail: Pick<PaperExperimentDetail
 
 /** The exchanges a Live run trades on, as its messages name them ("Lighter", "Lighter and Hyperliquid"). */
 function liveExchangesOf(detail: Partial<Pick<PaperExperimentDetail, 'tracks'>>): string {
-  const venues = [...new Set((detail.tracks ?? []).map((track) => track.venue))].sort((a, b) => (a === 'Lighter' ? -1 : b === 'Lighter' ? 1 : 0));
-  return venues.join(' and ') || 'Lighter';
+  return exchangeNames((detail.tracks ?? []).map((track) => track.venue));
+}
+
+function exchangeNames(venues: readonly string[] | undefined): string {
+  return [...new Set(venues ?? [])].sort((a, b) => (a === 'Lighter' ? -1 : b === 'Lighter' ? 1 : 0)).join(' and ') || 'Lighter';
+}
+
+/** The run a Stop button asks about. */
+export interface StopTarget {
+  readonly id: string;
+  readonly strategyName: string;
+  readonly live: boolean;
+  readonly exchanges: string;
+}
+
+function stopTargetOf(run: PaperExperimentSummary): StopTarget {
+  return { id: run.id, strategyName: run.strategyName, live: Boolean(run.live), exchanges: exchangeNames(run.venues) };
+}
+
+function canStopRun(status: PaperExperimentStatus): boolean {
+  return !['completed', 'interrupted'].includes(status);
+}
+
+/** "Are you sure?" before a run is stopped, from the runs list or a run page. */
+export function StopRunDialog({ run, busy, onCancel, onConfirm }: {
+  run: StopTarget;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onCancel(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onCancel]);
+  return <div className="strategy-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
+    <section className="strategy-dialog paper-stop-dialog" role="alertdialog" aria-modal="true" aria-labelledby="paper-stop-title" aria-describedby="paper-stop-text">
+      <header className="strategy-dialog-heading"><h3 id="paper-stop-title">{run.live ? 'Stop this LIVE run?' : 'Stop this run?'}</h3></header>
+      <div className="paper-stop-dialog-body">
+        <p id="paper-stop-text">Are you sure you want to stop <strong>{run.strategyName}</strong>?</p>
+        <p className="paper-stop-dialog-id">Run {run.id}</p>
+        <p>{run.live
+          ? <>Every open position of this run is closed at market on {run.exchanges}. Real money.</>
+          : <>The run ends and cannot be continued. Its trades and results stay in the history.</>}</p>
+        <div className="strategy-dialog-actions">
+          <button type="button" autoFocus onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className="paper-stop-confirm" onClick={onConfirm} disabled={busy}>{busy ? 'Stopping…' : run.live ? 'Yes, stop and close all' : 'Yes, stop'}</button>
+        </div>
+      </div>
+    </section>
+  </div>;
+}
+
+/** "Are you sure?" before a finished run and all its data are deleted from the server. */
+export function DeleteRunDialog({ run, busy, onCancel, onConfirm }: {
+  run: StopTarget;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onCancel(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onCancel]);
+  return <div className="strategy-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
+    <section className="strategy-dialog paper-stop-dialog" role="alertdialog" aria-modal="true" aria-labelledby="paper-delete-title" aria-describedby="paper-delete-text">
+      <header className="strategy-dialog-heading"><h3 id="paper-delete-title">{run.live ? 'Delete this LIVE run?' : 'Delete this run?'}</h3></header>
+      <div className="paper-stop-dialog-body">
+        <p id="paper-delete-text">Are you sure you want to delete <strong>{run.strategyName}</strong>?</p>
+        <p className="paper-stop-dialog-id">Run {run.id}</p>
+        <p>Its trades, events, results and journal are deleted from the server for good. This cannot be undone.</p>
+        {run.live && <p>The real trades stay in your {run.exchanges} account history; only this server's record goes.</p>}
+        <div className="strategy-dialog-actions">
+          <button type="button" autoFocus onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className="paper-stop-confirm" onClick={onConfirm} disabled={busy}>{busy ? 'Deleting…' : 'Yes, delete'}</button>
+        </div>
+      </div>
+    </section>
+  </div>;
 }
 
 /** What this run trades and under which rules: markets, money, fees, strategy parameters, execution. */
@@ -205,6 +286,7 @@ export function PaperPositionsTable({ detail, accountNames = {} }: {
           })}
       </tbody>)}
     </table></div>
+    {!['completed', 'interrupted'].includes(detail.status) && <PaperStrategyPanels panels={runtime.panels} />}
   </section>;
 }
 
@@ -254,28 +336,46 @@ function marketNames(markets: readonly string[] | undefined): string {
 
 function idFromPath(): string | null {
   if (typeof window === 'undefined') return null;
-  const match = /^\/paper\/([^/]+)\/?$/.exec(window.location.pathname);
-  if (!match) return null;
-  try { return decodeURIComponent(match[1]); } catch { return null; }
+  return runIdFromPath(window.location.pathname);
 }
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
-export function PaperRunHistory({ experiments, onOpen }: {
+function paramsCell(params: PaperExperimentSummary['params']) {
+  const entries = Object.entries(params ?? {});
+  if (!entries.length) return '—';
+  return <span className="paper-history-params">{entries.map(([name, value]) => <span key={name}>{name} = {String(value)}</span>)}</span>;
+}
+
+export function PaperRunHistory({ experiments, onOpen, onStop, stopBusyId = null, onDelete, deleteBusyId = null }: {
   experiments: readonly PaperExperimentSummary[];
   onOpen: (id: string) => void;
+  /** Asks to stop a run; the caller shows "are you sure". */
+  onStop?: (run: StopTarget) => void;
+  stopBusyId?: string | null;
+  /** Asks to delete a finished run; the caller shows "are you sure". */
+  onDelete?: (run: StopTarget) => void;
+  deleteBusyId?: string | null;
 }) {
   return <section className="paper-card">
     <div className="paper-card-title"><div><span className="eyebrow">HISTORY</span><h2>Server experiments</h2></div><span className="paper-count-chip">{experiments.length} recorded</span></div>
     <div className="table-wrap"><table className="paper-run-table paper-history-table">
-      <thead><tr><th>Strategy</th><th>Status</th><th>Total PnL <InfoTooltip label="total PnL" en="Each exchange's account equity (balance plus open positions) against its start: the virtual starting balance in Paper, the real balance at the start in LIVE. From the last account snapshot; fees included, funding not." ru="Капитал счёта каждой биржи (баланс плюс открытые позиции) против старта: виртуального стартового баланса в Paper, настоящего баланса на старте в LIVE. По последнему снимку счёта; комиссии учтены, funding — нет." /></th><th>Venues</th><th>Markets</th><th>Timeframe</th><th>Tracks</th><th>Capital / venue <InfoTooltip label="paper starting capital per venue" en="Initial virtual USDC balance assigned separately to each exchange when the run started. This is not a current account balance." ru="Начальный условный баланс в USDC, отдельно выделенный каждой бирже при запуске. Это не текущий остаток счёта." /></th><th>Started</th><th>Duration <InfoTooltip label="paper run duration" en="Elapsed time from the start until the end of the run. For an active run this grows while the page refreshes. A run that never started has no duration." ru="Время от начала до окончания сеанса. У активного сеанса оно увеличивается при обновлении страницы. Если сеанс не начался, длительности нет." /></th><th>Ended</th></tr></thead>
+      <thead><tr><th>Strategy</th><th>Status</th><th>Total PnL <InfoTooltip label="total PnL" en="Each exchange's account equity (balance plus open positions) against its start: the virtual starting balance in Paper, the real balance at the start in LIVE. From the last account snapshot; fees included, funding not." ru="Капитал счёта каждой биржи (баланс плюс открытые позиции) против старта: виртуального стартового баланса в Paper, настоящего баланса на старте в LIVE. По последнему снимку счёта; комиссии учтены, funding — нет." /></th><th>Strategy parameters <InfoTooltip label="strategy parameters" en="The parameters a Python strategy was started with; runs of one strategy differ only here. Pine runs have none." ru="Параметры, с которыми запущена Python-стратегия; прогоны одной стратегии отличаются только здесь. У Pine-прогонов их нет." /></th><th>Venues</th><th>Markets</th><th>Timeframe</th><th>Tracks</th><th>Capital / venue <InfoTooltip label="paper starting capital per venue" en="Initial virtual USDC balance assigned separately to each exchange when the run started. This is not a current account balance." ru="Начальный условный баланс в USDC, отдельно выделенный каждой бирже при запуске. Это не текущий остаток счёта." /></th><th>Started</th><th>Duration <InfoTooltip label="paper run duration" en="Elapsed time from the start until the end of the run. For an active run this grows while the page refreshes. A run that never started has no duration." ru="Время от начала до окончания сеанса. У активного сеанса оно увеличивается при обновлении страницы. Если сеанс не начался, длительности нет." /></th><th>Ended</th><th>Actions</th></tr></thead>
       <tbody>{experiments.map((item) => <tr key={item.id} className="paper-history-row" tabIndex={0} aria-label={`Open run of ${item.strategyName}`}
         onClick={() => onOpen(item.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(item.id); } }}><td><strong>{item.strategyName}</strong>{item.live && <> <span className="paper-live-badge">LIVE</span></>}</td><td><strong>{visibleStatus(item)}</strong></td><td className="paper-history-pnl">{item.pnl?.length
           ? item.pnl.map((row) => <div key={row.venue}><span>{row.venue}</span> {row.total === null ? '—'
             : <b className={pnlClass(row.total)}>{signedNumber(row.total)}{row.percent === null ? '' : ` (${signedNumber(row.percent)}%)`}</b>}</div>)
-          : '—'}</td><td>{item.venues?.join(', ') || '—'}</td><td>{marketNames(item.markets)}</td><td>{item.timeframe ?? '—'}</td><td>{item.trackCount}</td><td>{item.live ? 'real' : item.capitalPerVenue == null ? '—' : `${item.capitalPerVenue.toLocaleString()} USDC`}</td><td>{formatDate(item.startedAt)}</td><td>{formatDuration(item)}</td><td>{formatDate(item.endedAt)}</td></tr>)}</tbody>
+          : '—'}</td><td>{paramsCell(item.params)}</td><td>{item.venues?.join(', ') || '—'}</td><td>{marketNames(item.markets)}</td><td>{item.timeframe ?? '—'}</td><td>{item.trackCount}</td><td>{item.live ? 'real' : item.capitalPerVenue == null ? '—' : `${item.capitalPerVenue.toLocaleString()} USDC`}</td><td>{formatDate(item.startedAt)}</td><td>{formatDuration(item)}</td><td>{formatDate(item.endedAt)}</td>
+        <td>{onStop && canStopRun(item.status) && <button type="button" className="paper-text-button paper-stop-button" disabled={stopBusyId !== null}
+          aria-label={`Stop run ${item.id} of ${item.strategyName}`}
+          onClick={(event) => { event.stopPropagation(); onStop(stopTargetOf(item)); }}
+          onKeyDown={(event) => event.stopPropagation()}>{stopBusyId === item.id ? 'Stopping…' : item.status === 'stopping' ? 'Retry stop' : 'Stop'}</button>}
+          {onDelete && !canStopRun(item.status) && <button type="button" className="paper-text-button paper-stop-button" disabled={deleteBusyId !== null}
+            aria-label={`Delete run ${item.id} of ${item.strategyName}`}
+            onClick={(event) => { event.stopPropagation(); onDelete(stopTargetOf(item)); }}
+            onKeyDown={(event) => event.stopPropagation()}>{deleteBusyId === item.id ? 'Deleting…' : 'Delete'}</button>}</td></tr>)}</tbody>
     </table></div>
   </section>;
 }
@@ -309,7 +409,8 @@ export function PaperRunActivity({ activity, loading, refreshFailed, pageIndex, 
             : <ol className="paper-activity-list">{shownEvents.map((event) => <li key={event.id}><time dateTime={event.at ?? undefined}>{formatDate(event.at)}</time><span className="paper-activity-venue">{event.venue ? `${event.venue}${event.market ? ` · ${event.market}` : ''}` : 'Server'}</span><span>{event.message}</span></li>)}</ol>}
       {events.length > EVENTS_COLLAPSED && <button type="button" className="paper-text-button paper-events-toggle" onClick={() => setExpanded((value) => !value)}>{expanded ? `Show the latest ${EVENTS_COLLAPSED} only` : `Show all ${events.length} events`}</button>}
     </section>
-    <section className="paper-activity-panel" aria-labelledby="paper-fills-title">
+    <details className="paper-activity-panel paper-fills-details" aria-labelledby="paper-fills-title">
+      <summary><span className="eyebrow">ALL FILLS</span> every fill as a separate row{activity?.totalFills ? ` · ${activity.totalFills}` : ''}</summary>
       <div className="paper-card-title"><div><span className="eyebrow">EXECUTION HISTORY</span><h2 id="paper-fills-title">{live ? <>Trades on {exchanges} <InfoTooltip label="Live trades" en={`Every real fill of this run on ${exchanges}, 20 at a time. Entry and exit fills are separate rows. Fees are the ones the exchange charged; funding is not included in the realized PnL.`} ru={`Все настоящие исполнения этого прогона на ${exchanges}, по 20 на странице. Вход и выход — отдельные строки. Комиссии — те, что взяла биржа; funding в реализованный PnL не входит.`} /></> : <>Virtual trades <InfoTooltip label="paper virtual trades" en="Every committed virtual fill can be browsed here, 20 at a time. Entry and exit fills are separate rows. They are simulations, not real exchange orders. Realized PnL is shown only when the execution engine supplies it; funding is excluded." ru="Здесь можно просмотреть все записанные условные исполнения по 20 на странице. Вход и выход показаны отдельными строками. Это симуляция, а не реальные заявки на бирже. Реализованный PnL показан только там, где движок передал его; funding не учитывается." /></>}</h2><p>{!activity ? 'Loading saved fills…' : activity.totalFills === null ? 'Saved fills from available journals' : `${activity.totalFills} committed virtual fills`}</p></div></div>
       {loading ? <p className="paper-activity-empty">{live ? 'Loading trades…' : 'Loading virtual trades…'}</p>
         : !activity ? <p className="paper-activity-empty">{live ? 'Trade history is unavailable.' : 'Virtual trade history is unavailable.'}</p>
@@ -318,7 +419,7 @@ export function PaperRunActivity({ activity, loading, refreshFailed, pageIndex, 
             : (live ? 'No trades found in the available journal history.' : 'No virtual trades found in the available journal history.')}</p>
             : <div className="table-wrap"><table className="paper-run-table paper-fill-table"><thead><tr><th>Time</th><th>Exchange</th><th>Market</th><th>Action</th><th>Side</th><th>Position</th><th>Quantity</th><th>Price</th><th>Value</th><th>Fee</th><th>Realized PnL</th></tr></thead><tbody>{fills.map((fill) => <tr key={fill.id}><td>{formatDate(fill.at)}</td><td>{fill.venue}</td><td>{fill.market}</td><td className="paper-fill-kind">{fill.kind}</td><td>{fill.side}</td><td>{fill.positionSide}</td><td>{fill.quantity}</td><td>{fill.price === null ? '—' : `${fill.price} USDC`}</td><td>{fill.quote} USDC</td><td>{fill.fee === null ? '—' : `${fill.fee} USDC`}</td><td>{fill.realizedPnl === null ? '—' : `${fill.realizedPnl} USDC`}</td></tr>)}</tbody></table></div>}
       {(pageIndex > 0 || activity?.nextFillsCursor) && <div className="paper-fill-pagination"><span>{activity ? `${fills.length ? `${first}–${last}` : '0'}${activity.totalFills === null ? ' shown' : ` of ${activity.totalFills}`}` : 'Page unavailable'}</span><button type="button" className="paper-text-button" disabled={pageIndex === 0} onClick={onPrevious}>Previous</button><button type="button" className="paper-text-button" disabled={!activity?.nextFillsCursor} onClick={onNext}>Next</button></div>}
-    </section>
+    </details>
   </>;
 }
 
@@ -339,17 +440,22 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
     return () => controller.abort();
   }, [liveRun]);
   const [activity, setActivity] = useState<PaperExperimentActivity | null>(null);
+  const [trades, setTrades] = useState<PaperExperimentTrades | null>(null);
   const [activityRefreshFailed, setActivityRefreshFailed] = useState(false);
   const [fillPageCursors, setFillPageCursors] = useState<(string | null)[]>([null]);
   const [fillPageIndex, setFillPageIndex] = useState(0);
   const [refreshError, setRefreshError] = useState('');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
-  const [stopBusy, setStopBusy] = useState(false);
+  const [stopBusyId, setStopBusyId] = useState<string | null>(null);
+  const [confirmStop, setConfirmStop] = useState<StopTarget | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<StopTarget | null>(null);
+  const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState('');
   const [stopError, setStopError] = useState('');
   const [refreshToken, setRefreshToken] = useState(0);
 
   useEffect(() => {
-    const syncPath = () => { setSelectedId(idFromPath()); setDetail(null); setActivity(null); setFillPageCursors([null]); setFillPageIndex(0); };
+    const syncPath = () => { setSelectedId(idFromPath()); setDetail(null); setActivity(null); setTrades(null); setFillPageCursors([null]); setFillPageIndex(0); };
     window.addEventListener('popstate', syncPath);
     window.addEventListener('paper-route-changed', syncPath);
     return () => { window.removeEventListener('popstate', syncPath); window.removeEventListener('paper-route-changed', syncPath); };
@@ -363,7 +469,7 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
     const poll = async () => {
       if (inFlight) return;
       inFlight = true;
-      const [capabilityResult, listResult, detailResult, activityResult] = await Promise.allSettled([
+      const [capabilityResult, listResult, detailResult, activityResult, tradesResult] = await Promise.allSettled([
         loadPaperCapabilities(controller.signal),
         selectedId ? Promise.resolve(null) : listPaperExperiments(controller.signal),
         selectedId ? loadPaperExperiment(selectedId, controller.signal) : Promise.resolve(null),
@@ -371,6 +477,7 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
           limit: FILLS_PER_PAGE,
           fillsCursor: fillsCursor ?? undefined,
         }, controller.signal) : Promise.resolve(null),
+        selectedId ? loadPaperExperimentTrades(selectedId, controller.signal) : Promise.resolve(null),
       ]);
       if (!active) return;
       if (capabilityResult.status === 'fulfilled') setCapabilities(capabilityResult.value);
@@ -378,6 +485,7 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
       if (detailResult.status === 'fulfilled') setDetail(detailResult.value);
       if (selectedId) {
         if (activityResult.status === 'fulfilled') setActivity(activityResult.value);
+        if (tradesResult.status === 'fulfilled') setTrades(tradesResult.value);
         setActivityRefreshFailed(activityResult.status === 'rejected');
       }
       const failures = [capabilityResult, listResult, detailResult]
@@ -393,10 +501,11 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
   }, [selectedId, refreshToken, fillPageIndex, fillsCursor]);
 
   const openRun = (id: string | null) => {
-    window.history.pushState(null, '', id ? `/paper/${encodeURIComponent(id)}` : '/paper');
+    window.history.pushState(null, '', runPath(id));
     setSelectedId(id);
     setDetail(null);
     setActivity(null);
+    setTrades(null);
     setActivityRefreshFailed(false);
     setFillPageCursors([null]);
     setFillPageIndex(0);
@@ -419,22 +528,41 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
     setActivityRefreshFailed(false);
   };
 
-  const stopRun = async () => {
-    if (!selectedId || stopBusy) return;
-    if (detail?.live && !window.confirm('Stop this LIVE run? Every open position is closed at market on Lighter.')) return;
-    setStopBusy(true);
+  /** Runs after "Yes, stop" in the dialog, from the runs list or this run's page. */
+  const stopRun = async (target: StopTarget) => {
+    if (stopBusyId) return;
+    setStopBusyId(target.id);
     setStopError('');
     try {
-      setDetail(await stopPaperExperiment(selectedId));
+      const stopped = await stopPaperExperiment(target.id);
+      if (selectedId === target.id) setDetail(stopped);
       setRefreshToken((value) => value + 1);
     } catch (reason) {
       setStopError(errorMessage(reason));
     } finally {
-      setStopBusy(false);
+      setStopBusyId(null);
+      setConfirmStop(null);
     }
   };
 
-  const canStop = detail && !['completed', 'interrupted'].includes(detail.status);
+  /** Runs after "Yes, delete" in the dialog: the run and its data are gone from the server. */
+  const deleteRun = async (target: StopTarget) => {
+    if (deleteBusyId) return;
+    setDeleteBusyId(target.id);
+    setDeleteError('');
+    try {
+      await deletePaperExperiment(target.id);
+      setExperiments((current) => current?.filter((item) => item.id !== target.id) ?? current);
+      setRefreshToken((value) => value + 1);
+    } catch (reason) {
+      setDeleteError(errorMessage(reason));
+    } finally {
+      setDeleteBusyId(null);
+      setConfirmDelete(null);
+    }
+  };
+
+  const canStop = detail && canStopRun(detail.status);
   return (
     <section className="paper-page" aria-labelledby="paper-runs-title">
       <div className="paper-page-heading">
@@ -445,6 +573,7 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
         ? <div className="paper-slots-note" role="status"><Clock3 size={16} /><span>{capabilities.activeExperiments} of {capabilities.maxConcurrentExperiments} runs are active. To start a new one, stop one of them.</span></div>
         : capabilities && !capabilities.available && <div className="paper-preview-notice" role="status"><AlertTriangle size={18} /><div><strong>New launches unavailable.</strong><span> {capabilities.reason || 'The server has not enabled Paper admission.'}</span></div></div>}
       {refreshError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>Status refresh failed.</strong><span> Try Refresh now. {lastRefreshedAt && `Last complete refresh: ${formatDate(lastRefreshedAt)}.`}</span></div></div>}
+      {deleteError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>The run was not deleted.</strong><span> {deleteError}</span></div></div>}
       {stopError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>Stop was not confirmed by the server.</strong><span> This run may still occupy the active slot. Refresh its status before trying again.</span></div></div>}
       <div className="paper-runs-toolbar"><span>{lastRefreshedAt ? `Last updated ${formatDate(lastRefreshedAt)} · automatic refresh every 5 seconds` : 'Waiting for the first server response…'}</span><button className="paper-text-button" type="button" onClick={() => setRefreshToken((value) => value + 1)}>Refresh now</button></div>
 
@@ -456,12 +585,14 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
             markets={[...new Set(detail.tracks.filter((track) => track.venue === 'Hyperliquid' && isXyzMarket(track.market)).map((track) => track.market))]} />}
           <PaperPositionsTable detail={detail} accountNames={accountNames} />
           <section className="paper-activity-panel paper-run-overview" aria-labelledby="paper-run-title">
-            <div className="paper-run-detail-header"><div><span className="eyebrow">EXPERIMENT / {detail.id}</span><h2 id="paper-run-title">{detail.strategyName}{detail.live && <> <span className="paper-live-badge">LIVE — real money · {liveExchangesOf(detail)}</span></>}</h2><p>Status: <strong>{visibleStatus(detail)}</strong>{visibleStatus(detail) === 'Stop needs attention' && <> <InfoTooltip label="stop needs attention" en="The server could not confirm that shutdown finished. This experiment may still block a new launch. Try Retry stop after the runtime issue is resolved." ru="Сервер не смог подтвердить завершение остановки. Этот эксперимент может блокировать новый запуск. После устранения проблемы можно повторить остановку." /></>}</p></div>{canStop && <button className="paper-text-button paper-stop-button" type="button" disabled={stopBusy} onClick={() => { void stopRun(); }}>{stopBusy ? 'Stopping…' : detail.status === 'stopping' ? 'Retry stop' : detail.live ? 'Stop and close all' : 'Stop experiment'}</button>}</div>
+            <div className="paper-run-detail-header"><div><span className="eyebrow">EXPERIMENT / {detail.id}</span><h2 id="paper-run-title">{detail.strategyName}{detail.live && <> <span className="paper-live-badge">LIVE — real money · {liveExchangesOf(detail)}</span></>}</h2><p>Status: <strong>{visibleStatus(detail)}</strong>{visibleStatus(detail) === 'Stop needs attention' && <> <InfoTooltip label="stop needs attention" en="The server could not confirm that shutdown finished. This experiment may still block a new launch. Try Retry stop after the runtime issue is resolved." ru="Сервер не смог подтвердить завершение остановки. Этот эксперимент может блокировать новый запуск. После устранения проблемы можно повторить остановку." /></>}</p></div>{canStop && <button className="paper-text-button paper-stop-button" type="button" disabled={stopBusyId !== null}
+              onClick={() => setConfirmStop({ id: detail.id, strategyName: detail.strategyName, live: Boolean(detail.live), exchanges: liveExchangesOf(detail) })}>{stopBusyId === detail.id ? 'Stopping…' : detail.status === 'stopping' ? 'Retry stop' : detail.live ? 'Stop and close all' : 'Stop experiment'}</button>}</div>
             {canStop && <NativeRunNotice detail={detail} />}
             <LiveStopOutcome detail={detail} />
             <div className="paper-run-summary"><div><span>Started</span><strong>{formatDate(detail.startedAt)}</strong></div>{detail.endedAt ? <div><span>Ended</span><strong>{formatDate(detail.endedAt)}</strong></div> : <div><span>Running for</span><strong>{formatDuration(detail)}</strong></div>}<div><span>Timeframe</span><strong>{detail.settings.timeframe}</strong></div><PaperRunHealth detail={detail} /></div>
             <PaperRunRules detail={detail} inOverview />
           </section>
+          <PaperTradeGroups trades={trades} live={Boolean(detail.live)} />
           <PaperRunActivity live={Boolean(detail.live)} exchanges={liveExchangesOf(detail)} activity={activity} loading={activity === null && !activityRefreshFailed} refreshFailed={activityRefreshFailed} pageIndex={fillPageIndex} onPrevious={previousFillPage} onNext={nextFillPage} />
           <details className="paper-tech-details"><summary>Technical details</summary>
           <div className="paper-account-grid">{detail.accounts.filter((account) => !detail.live || detail.tracks.some((track) => track.venue === account.venue)).map((account) => {
@@ -499,7 +630,12 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
 
       {!selectedId && (experiments === null ? <div className="paper-empty-runs"><Clock3 size={26} /><h2>{refreshError ? 'Cannot load server runs' : 'Loading server runs…'}</h2></div>
         : experiments.length === 0 ? <div className="paper-empty-runs"><ShieldCheck size={26} /><h2>No paper runs recorded <InfoTooltip label="empty paper runs" en="The server returned an empty experiment list. Saving a strategy or a Paper draft does not create a run." ru="Сервер вернул пустой список экспериментов. Сохранение стратегии или черновика Paper не создаёт сеанс." /></h2><button type="button" className="paper-text-button" onClick={onPrepare}>Prepare an experiment <ArrowRight size={15} /></button></div>
-          : <PaperRunHistory experiments={experiments} onOpen={(id) => openRun(id)} />)}
+          : <PaperRunHistory experiments={experiments} onOpen={(id) => openRun(id)} onStop={setConfirmStop} stopBusyId={stopBusyId}
+            onDelete={setConfirmDelete} deleteBusyId={deleteBusyId} />)}
+      {confirmStop && <StopRunDialog run={confirmStop} busy={stopBusyId === confirmStop.id}
+        onCancel={() => setConfirmStop(null)} onConfirm={() => { void stopRun(confirmStop); }} />}
+      {confirmDelete && <DeleteRunDialog run={confirmDelete} busy={deleteBusyId === confirmDelete.id}
+        onCancel={() => setConfirmDelete(null)} onConfirm={() => { void deleteRun(confirmDelete); }} />}
     </section>
   );
 }

@@ -5,8 +5,9 @@ import {
   type PaperExperimentActivity,
   type PaperExperimentActivityEvent,
   type PaperExperimentDetail,
+  type PaperExperimentTrades,
 } from '../../../../packages/shared/src/paper-experiment-contracts.js';
-import { NautilusPaperLedgerQueryError, readNautilusPaperActivity } from './nautilus-paper-ledger.js';
+import { NautilusPaperLedgerQueryError, readNautilusPaperActivity, readNautilusPaperTrades } from './nautilus-paper-ledger.js';
 
 const MAX_PAGE_SIZE = 100;
 
@@ -61,5 +62,23 @@ export function readPaperExperimentActivityV1(input: {
   } catch (error) {
     if (error instanceof NautilusPaperLedgerQueryError) throw new PaperExperimentActivityQueryError(error.message);
     return controlOnly(detail, 'partial');
+  }
+}
+
+/** The run's fills grouped by position and by the legs opened together (pairs); nothing invented on error. */
+export function readPaperExperimentTradesV1(input: {
+  readonly detail: PaperExperimentDetail;
+  readonly runtimeDirectory: string | null;
+}): PaperExperimentTrades {
+  const empty = (coverage: PaperExperimentTrades['coverage']): PaperExperimentTrades => ({ groups: [], truncated: false, coverage });
+  if (!input.runtimeDirectory) return empty('control_only');
+  const directory = path.join(path.resolve(input.runtimeDirectory), input.detail.id);
+  if (!existsSync(directory)) return empty('control_only');
+  if (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink()) return empty('partial');
+  if (!existsSync(path.join(directory, 'nautilus.sqlite'))) return empty('control_only');
+  try {
+    return readNautilusPaperTrades(input.detail, directory);
+  } catch {
+    return empty('partial');
   }
 }

@@ -24,9 +24,11 @@ function fakeHyperliquid(calls: unknown[] = []) {
     }
     const universe = body.dex === 'xyz'
       ? [{ name: 'xyz:SP500', szDecimals: 3, maxLeverage: 50 }, { name: 'xyz:OLD', szDecimals: 2, maxLeverage: 5, isDelisted: true }]
-      : [{ name: 'BTC', szDecimals: 5, maxLeverage: 40 }, { name: 'kPEPE', szDecimals: 0, maxLeverage: 10 }];
+      : body.dex === 'io' ? [{ name: 'io:ANTH', szDecimals: 4, maxLeverage: 15 }]
+        : body.dex === 'para' ? [{ name: 'para:ANTH', szDecimals: 4, maxLeverage: 10 }]
+          : [{ name: 'BTC', szDecimals: 5, maxLeverage: 40 }, { name: 'kPEPE', szDecimals: 0, maxLeverage: 10 }];
     if (body.type === 'meta') return Response.json({ universe });
-    const volumes = body.dex === 'xyz' ? ['3000000', '1'] : ['9000000', '100'];
+    const volumes = body.dex === 'xyz' ? ['3000000', '1'] : body.dex === 'io' ? ['2000000'] : body.dex === 'para' ? ['50'] : ['9000000', '100'];
     return Response.json([{ universe }, volumes.map((dayNtlVlm) => ({ dayNtlVlm }))]);
   };
 }
@@ -56,13 +58,16 @@ describe('Hyperliquid API history', () => {
     expect(result.provenance.interval).toBe('1w');
   });
 
-  it('finds main and XYZ contracts by their exact names and lists the active ones by turnover', async () => {
+  it('finds main and HIP-3 contracts (xyz, io, para) by their exact names and lists the active ones by turnover', async () => {
     const provider = new HyperliquidApiProvider({ fetcher: fakeHyperliquid(), clock: () => now });
     expect(await provider.getInstrument('xyz:SP500')).toMatchObject({ symbol: 'xyz:SP500', szDecimals: 3, maxLeverage: 50, isActive: true, instrumentType: 'perp' });
+    expect(await provider.getInstrument('io:ANTH')).toMatchObject({ symbol: 'io:ANTH', szDecimals: 4, maxLeverage: 15 });
+    expect(await provider.getInstrument('para:ANTH')).toMatchObject({ symbol: 'para:ANTH', maxLeverage: 10 });
     expect(await provider.getInstrument('kPEPE')).toMatchObject({ szDecimals: 0 });
     await expect(provider.getInstrument('KPEPE')).rejects.toThrow('no perpetual market named KPEPE');
     const list = await provider.listMarkets();
-    expect(list.markets.map((market) => market.symbol)).toEqual(['BTC', 'xyz:SP500', 'kPEPE']);
+    expect(list.markets.map((market) => market.symbol)).toEqual(['BTC', 'xyz:SP500', 'io:ANTH', 'kPEPE', 'para:ANTH']);
+    expect(list.markets[2]).toMatchObject({ dex: 'io', maxLeverage: 15 });
     expect(list.markets[1]).toMatchObject({ dex: 'xyz', maxLeverage: 50, volume24hUsd: 3_000_000 });
     expect((await provider.listMarkets()).sourceStatus).toBe('cached');
   });

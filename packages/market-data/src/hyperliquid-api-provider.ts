@@ -31,7 +31,8 @@ export interface HyperliquidApiProviderOptions {
 interface UniverseEntry { name: string; szDecimals: number; maxLeverage: number; isDelisted?: boolean }
 
 function dexOf(symbol: string): HyperliquidBacktestDex {
-  return symbol.startsWith('xyz:') ? 'xyz' : '';
+  const dex = symbol.includes(':') ? symbol.slice(0, symbol.indexOf(':')) : '';
+  return (HYPERLIQUID_BACKTEST_DEXES as readonly string[]).includes(dex) ? dex as HyperliquidBacktestDex : '';
 }
 
 function parseNumber(value: unknown, field: string): number {
@@ -144,7 +145,7 @@ export class HyperliquidApiProvider implements HistoricalMarketDataProvider {
     };
   }
 
-  /** Active markets of the main exchange and XYZ, largest 24-hour turnover first; an older list if Hyperliquid fails. */
+  /** Active markets of the main exchange and the HIP-3 exchanges, largest 24-hour turnover first; an older list if Hyperliquid fails. */
   async listMarkets(signal?: AbortSignal): Promise<HyperliquidMarketList> {
     const now = this.#clock().getTime();
     if (this.#markets && now - Date.parse(this.#markets.fetchedAt) < META_TTL_MS) return { ...this.#markets, sourceStatus: 'cached' };

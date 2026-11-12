@@ -33,6 +33,20 @@ class DipBuyer(Strategy):
     def on_fill(self, ctx, fill):
         if fill.category == "exit":
             ctx.state["done"] = True
+
+
+class HedgedDipBuyer(DipBuyer):
+    name = "Hedged dip buyer"
+    exchange_take_profit = True
+
+
+class FixedDipBuyer(DipBuyer):
+    name = "Dip buyer with 300 USDC entries"
+
+    def on_quote(self, ctx, quote):
+        if ctx.position == 0 and not ctx.orders and quote.ask <= 99.0 and not ctx.state.get("done"):
+            ctx.entry("L", "long", limit="99.00", ioc=True, usdc=300)
+            ctx.exit("XL", "L", profit_percent=1.2, loss_percent=1.0, profit_type="market")
 """
 
 
@@ -457,6 +471,98 @@ async def stop_removed_just_before_the_closing_fill():
         print("live stop removed just before the closing fill PASS", flush=True)
 
 
+def hedged(run):
+    """The same dip buyer declaring hedged legs: its exchange-side protection is a bracket."""
+    run.config["strategy"]["ref"] = "live_pack/dip:HedgedDipBuyer"
+    return run
+
+
+async def exchange_bracket_for_hedged_legs():
+    """Strategy.exchange_take_profit: besides the stop, a reduce-only take-profit the same distance above the
+    entry; the strategy's own exit removes both."""
+    with tempfile.TemporaryDirectory(prefix="psr-live-") as tmp:
+        folder = Path(tmp)
+        run = hedged(live_run(folder, "live-bracket", exchangeStopPercent="2", exchangeStopFrom="entry_price"))
+        try:
+            entry = await enter(run)
+            await run.wait(lambda: run.messages("exchange-side take-profit on Lighter"), "exchange-side take-profit placed")
+            [stop] = run.messages("exchange-side stop on Lighter")
+            [take] = run.messages("exchange-side take-profit on Lighter")
+            # 2 % on each side of the 99.00 entry: a sell stop at 97.02, a sell take-profit at 100.98.
+            assert f"sell {entry['quantity']} SOL if price reaches 97.02 " in stop["message"], stop
+            assert f"sell {entry['quantity']} SOL if price reaches 100.98 " in take["message"], take
+            assert run.messages("exchange-side take-profit 2% from the entry price (hedged legs)"), run.events
+            await run.prices(("100.19", "100.25"))  # the strategy's own take-profit (+1.2 %) closes first
+            await run.wait(lambda: run.fills("exit"), "take-profit")
+            await run.wait(lambda: len(run.messages("removed from Lighter")) >= 2, "both exchange-side orders removed")
+            removed = [e["message"] for e in run.messages("removed from Lighter")]
+            assert any("exchange-side stop" in m for m in removed) and any("exchange-side take-profit" in m for m in removed), removed
+            await asyncio.sleep(2.5)  # past the grace: nothing is placed again
+            assert len(run.messages("exchange-side take-profit on Lighter")) == 1, run.events
+            assert not stopped_reason(run) and not run.failures(), run.events
+            await live_stop(run, "live bracket done")
+        except Exception:
+            report(run, folder)
+            raise
+        finally:
+            await run.close()
+        print("live exchange-side bracket for hedged legs PASS", flush=True)
+
+
+async def exchange_take_profit_executes_and_halts():
+    """The exchange-side take-profit executes on its own (0.5 % above the entry, below the strategy's
+    +1.2 %): booked, the strategy follows, the run halts as for the exchange-side stop."""
+    with tempfile.TemporaryDirectory(prefix="psr-live-") as tmp:
+        folder = Path(tmp)
+        run = hedged(live_run(folder, "live-tp-fires", exchangeStopPercent="0.5", exchangeStopFrom="entry_price"))
+        try:
+            entry = await enter(run)
+            await run.wait(lambda: run.messages("exchange-side take-profit on Lighter"), "exchange-side take-profit placed")
+            [take] = run.messages("exchange-side take-profit on Lighter")
+            assert "if price reaches 99.50 " in take["message"], take          # 99.00 x 1.005 = 99.495, rounded up
+            await asyncio.sleep(0.2)
+            await run.prices(("99.60", "99.65"))
+            await run.finish()
+            [reason] = stopped_reason(run)
+            assert "the exchange-side take-profit executed on Lighter" in reason, reason
+            exits = run.fills("exit")
+            assert sum(Decimal(f["quantity"]) for f in exits) == Decimal(entry["quantity"]), exits
+            snapshot = [e for e in run.events if e["type"] == "snapshot"][-1]
+            assert not next(a for a in snapshot["accounts"] if a["venue"] == "Lighter")["positions"], snapshot
+        except Exception:
+            report(run, folder)
+            raise
+        finally:
+            await run.close()
+        print("live exchange-side take-profit executes and halts PASS", flush=True)
+
+
+async def exchange_take_profit_removed_by_lighter():
+    """Lighter removes the exchange-side take-profit on its own: placed again once; a second time halts."""
+    with tempfile.TemporaryDirectory(prefix="psr-live-") as tmp:
+        folder = Path(tmp)
+        run = hedged(live_run(folder, "live-tp-lost", exchangeStopPercent="2", exchangeStopFrom="entry_price"))
+        try:
+            entry = await enter(run)
+            await run.wait(lambda: run.messages("exchange-side take-profit on Lighter"), "exchange-side take-profit placed")
+            await asyncio.sleep(0.3)
+            await run.send({"cmd": "live_test_drop_safety", "market": "SOL", "kind": "tp"})
+            await run.wait(lambda: len(run.messages("exchange-side take-profit on Lighter")) == 2, "take-profit placed again")
+            assert len(run.messages("exchange-side stop on Lighter")) == 1, run.events   # the stop is untouched
+            await asyncio.sleep(0.3)
+            await run.send({"cmd": "live_test_drop_safety", "market": "SOL", "kind": "tp"})
+            await run.finish()
+            [reason] = stopped_reason(run)
+            assert "Lighter canceled the exchange-side take-profit twice within a minute" in reason and CLOSED in reason, reason
+            assert sum(Decimal(f["quantity"]) for f in run.fills("exit")) == Decimal(entry["quantity"]), run.fills("exit")
+        except Exception:
+            report(run, folder)
+            raise
+        finally:
+            await run.close()
+        print("live exchange-side take-profit removed by Lighter PASS", flush=True)
+
+
 async def daily_loss_limit_closes_everything():
     with tempfile.TemporaryDirectory(prefix="psr-live-") as tmp:
         folder = Path(tmp)
@@ -566,6 +672,24 @@ async def max_position_shrinks_the_entry():
             await run.close()
         print("live max position shrinks the entry PASS", flush=True)
 
+
+async def entry_in_usdc():
+    """A Python entry with its own amount (ctx.entry(..., usdc=300)): 300 USDC whatever the balance and Order size."""
+    with tempfile.TemporaryDirectory(prefix="psr-live-") as tmp:
+        folder = Path(tmp)
+        run = live_run(folder, "live-usdc")
+        run.config["strategy"]["ref"] = "live_pack/dip:FixedDipBuyer"
+        try:
+            entry = await enter(run)
+            assert Decimal(entry["quantity"]) == Decimal("3.030"), entry  # floor(300 / 99.00, 0.001)
+            assert not run.messages("by the Max position"), run.events
+            await live_stop(run, "live usdc done")
+        except Exception:
+            report(run, folder)
+            raise
+        finally:
+            await run.close()
+        print("live entry in USDC PASS", flush=True)
 
 async def minimum_order_size_entry():
     """Minimum order size: the market's smallest order (10 USDC here) plus 15 %, not Order size."""
@@ -957,6 +1081,7 @@ if __name__ == "__main__":
     asyncio.run(positions_may_exceed_the_balance_up_to_the_leverage())
     asyncio.run(max_position_shrinks_the_entry())
     asyncio.run(minimum_order_size_entry())
+    asyncio.run(entry_in_usdc())
     asyncio.run(account_leverage_limits_all_positions())
     asyncio.run(stop_closes_the_open_position())
     asyncio.run(engine_stop_executes_at_once())
@@ -972,4 +1097,7 @@ if __name__ == "__main__":
     asyncio.run(daily_loss_counts_lighter_pnl_in_a_gap())
     asyncio.run(exchange_stop_from_the_entry_price())
     asyncio.run(exchange_stop_executes_and_halts())
+    asyncio.run(exchange_bracket_for_hedged_legs())
+    asyncio.run(exchange_take_profit_executes_and_halts())
+    asyncio.run(exchange_take_profit_removed_by_lighter())
     asyncio.run(position_check_halts_on_a_difference())

@@ -200,7 +200,7 @@ class LighterVenue(LiveVenue):
 
 HYPERLIQUID_INFO = "https://api.hyperliquid.xyz/info"
 # Perp dexes a Live run trades on Hyperliquid: the main dex and the HIP-3 dexes Paper offers (USDC collateral).
-HYPERLIQUID_DEXES = ("", "xyz")
+HYPERLIQUID_DEXES = ("", "xyz", "io", "para")  # main perps and the HIP-3 exchanges the app lists
 # The account read from the info API is reused for this long by the leverage and daily limits between
 # position checks; an older one is read again first.
 HYPERLIQUID_ACCOUNT_MAX_AGE_S = 30

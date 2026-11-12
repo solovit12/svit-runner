@@ -9,8 +9,8 @@ import { BACKTEST_TIMEFRAME_MS, type BacktestTimeframe } from './contracts.js';
  * One run never mixes the two: their candles differ by a tick now and then.
  */
 export const HYPERLIQUID_API_CANDLE_LIMIT = 5_000;
-/** Markets offered for Hyperliquid backtests: the main perps and the XYZ exchange (stocks, indices, commodities). */
-export const HYPERLIQUID_BACKTEST_DEXES = ['', 'xyz'] as const;
+/** Markets offered for Hyperliquid backtests: the main perps and the HIP-3 exchanges XYZ, EntropyIO (io) and Paragon (para). */
+export const HYPERLIQUID_BACKTEST_DEXES = ['', 'xyz', 'io', 'para'] as const;
 export type HyperliquidBacktestDex = typeof HYPERLIQUID_BACKTEST_DEXES[number];
 /** With a full-archive plan: before this day 0xArchive's trades are incomplete, so missing minutes cannot be rebuilt. */
 export const OXARCHIVE_FULL_ARCHIVE_FROM = '2025-03-22';
@@ -152,5 +152,5 @@ function hyperliquidTooEarlyMessage(
   };
 }
 
-/** Hyperliquid writes market names as they are listed (kPEPE, xyz:SP500); the main perps and XYZ only. */
-export const HYPERLIQUID_SYMBOL = /^(?:xyz:)?[A-Za-z0-9]{1,24}$/;
+/** Hyperliquid writes market names as they are listed (kPEPE, xyz:SP500, io:ANTH); the main perps and HYPERLIQUID_BACKTEST_DEXES. */
+export const HYPERLIQUID_SYMBOL = /^(?:(?:xyz|io|para):)?[A-Za-z0-9]{1,24}$/;

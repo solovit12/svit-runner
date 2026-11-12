@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { HYPERLIQUID_SYMBOL, type HyperliquidMarketList, type HyperliquidMarketOption } from '../../../../packages/shared/src/hyperliquid-history';
+import { HYPERLIQUID_HIP3_DEX_LABELS } from '../../../../packages/shared/src/strategy-catalog-contracts';
 import { loadHyperliquidMarkets } from '../lib/api';
 import { InfoTooltip } from './TranslatedText';
 import './BinanceMarketSelector.css';
@@ -21,7 +22,7 @@ interface HyperliquidMarketSelectorProps {
   disabled?: boolean;
 }
 
-/** Hyperliquid's main perps and the XYZ exchange (stocks, indices, commodities), largest 24-hour turnover first. */
+/** Hyperliquid's main perps and the HIP-3 exchanges (XYZ, EntropyIO, Paragon), largest 24-hour turnover first. */
 export function HyperliquidMarketSelector({ value, onChange, disabled = false }: HyperliquidMarketSelectorProps) {
   const id = useId();
   const listId = `${id}-markets`;
@@ -100,7 +101,7 @@ export function HyperliquidMarketSelector({ value, onChange, disabled = false }:
 
   return (
     <div className="binance-market-selector">
-      <div className="binance-market-label"><label htmlFor={id}>Symbol</label><InfoTooltip label="symbol list" en="Hyperliquid perpetuals: crypto on the main exchange and stocks, indices and commodities on XYZ (names start with xyz:), largest 24-hour turnover first." ru="Бессрочные контракты Hyperliquid: криптовалюты основной биржи и акции, индексы, сырьё на XYZ (названия начинаются с xyz:), сначала с наибольшим оборотом за 24 часа." /></div>
+      <div className="binance-market-label"><label htmlFor={id}>Symbol</label><InfoTooltip label="symbol list" en="Hyperliquid perpetuals: crypto on the main exchange; stocks, indices and commodities on XYZ (names start with xyz:), pre-IPO companies and stocks on EntropyIO (io:), stocks, indices and rates on Paragon (para:); largest 24-hour turnover first." ru="Бессрочные контракты Hyperliquid: криптовалюты основной биржи; акции, индексы, сырьё на XYZ (названия начинаются с xyz:), компании до IPO и акции на EntropyIO (io:), акции, индексы и ставки на Paragon (para:); сначала с наибольшим оборотом за 24 часа." /></div>
       <div className="binance-market-input-row">
         <input ref={inputRef} id={id} type="text" role="combobox" aria-autocomplete="list" aria-expanded={open} aria-controls={listId}
           aria-activedescendant={open && choiceCount > 0 ? `${listId}-option-${activeIndex}` : undefined}
@@ -131,7 +132,7 @@ export function HyperliquidMarketSelector({ value, onChange, disabled = false }:
                 aria-selected={market.symbol === value} className={index === activeIndex ? 'active' : ''}
                 onMouseEnter={() => setActiveIndex(index)} onMouseDown={(event) => event.preventDefault()}
                 onClick={() => choose(market.symbol)}>
-                <span><b>{market.symbol}</b><small>{market.dex === 'xyz' ? 'XYZ: stocks, indices, commodities' : 'Main exchange'} · up to {market.maxLeverage}×</small></span>
+                <span><b>{market.symbol}</b><small>{market.dex ? HYPERLIQUID_HIP3_DEX_LABELS[market.dex] : 'Main exchange'} · up to {market.maxLeverage}×</small></span>
                 <span>{new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(market.volume24hUsd)} USDC</span>
               </button>
             ))}

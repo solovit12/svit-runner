@@ -365,6 +365,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     liveAccountName: (id) => liveSettings?.account(id)?.name ?? null,
     legacyLiveAccountId: (exchange) => liveSettings?.legacyAccountId(exchange) ?? null,
     liveLoadRefusal: async (settings) => (exchangeLoad ? forecastRun(await exchangeLoad.view(), runLoadPlan(settings)).refusal : null),
+    runsDir: paperRunsDir ?? path.join(projectRoot, '.local', 'paper-runs'),
   });
   if (paperExperiments) {
     exchangeLoad = new ExchangeLoadMonitor({

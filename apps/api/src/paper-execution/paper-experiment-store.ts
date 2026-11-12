@@ -77,7 +77,8 @@ export type PaperExperimentStoreErrorKind =
   | 'INVALID_STORE'
   | 'EXPERIMENT_LIMIT'
   | 'IDEMPOTENCY_CONFLICT'
-  | 'NOT_FOUND';
+  | 'NOT_FOUND'
+  | 'RUN_ACTIVE';
 
 /** An active Live run and the accounts it trades (null: started before Live accounts existed). */
 export interface ActiveLiveRun {
@@ -126,6 +127,7 @@ function summary(row: ExperimentRow, settings: PaperStrategySettings = readSetti
     timeframe: settings.timeframe,
     capitalPerVenue: 'capitalPerVenue' in settings ? settings.capitalPerVenue : null,
     ...('live' in settings && settings.live ? { live: true } : {}),
+    ...('params' in settings ? { params: settings.params } : {}),
   };
 }
 
@@ -533,6 +535,19 @@ export class PaperExperimentStoreV1 {
       }
     }
     this.#interruptUnowned('Paper controller process ended; ambiguous market events cannot be replayed.');
+  }
+
+  /** Removes a finished run (completed or interrupted) with its markets; a run still going is refused. */
+  delete(id: string): void {
+    this.#transaction(() => {
+      const status = this.get(id)?.status;
+      if (!status) throw new PaperExperimentStoreError('NOT_FOUND', 'Paper experiment not found.');
+      if (status !== 'completed' && status !== 'interrupted') {
+        throw new PaperExperimentStoreError('RUN_ACTIVE', 'Stop the run before deleting it.');
+      }
+      this.#db.prepare('DELETE FROM paper_experiment_tracks WHERE experiment_id = ?').run(id);
+      this.#db.prepare('DELETE FROM paper_experiments WHERE id = ?').run(id);
+    });
   }
 
   #transaction(body: () => void): void {

@@ -37,7 +37,7 @@ from nautilus_trader.trading import Strategy
 VENUE = Venue("LIGHTER")
 HYPERLIQUID_INFO = {"mainnet": "https://api.hyperliquid.xyz/info", "testnet": "https://api.hyperliquid-testnet.xyz/info"}
 # Perp dexes the app trades on Hyperliquid: the main dex and the HIP-3 dexes Paper offers.
-HYPERLIQUID_DEXES = ("", "xyz")
+HYPERLIQUID_DEXES = ("", "xyz", "io", "para")  # main perps and the HIP-3 exchanges the app lists
 # Hyperliquid's clients load every market and the account before they count as connected; a busy
 # server needs more than Nautilus's usual 30 s for that.
 CONNECT_TIMEOUT_SECS = 90

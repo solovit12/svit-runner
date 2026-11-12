@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { assertNoLiveNautilusProcess, isFatalNautilusLogLine, ownedNautilusRuns } from '../apps/api/src/paper-execution/nautilus-process.js';
+import {
+  API_STALL_MS, assertNoLiveNautilusProcess, CHILD_SILENCE_MS, childSilent, isFatalNautilusLogLine, ownedNautilusRuns,
+} from '../apps/api/src/paper-execution/nautilus-process.js';
 
 describe('Nautilus Paper slot ownership', () => {
   it('lets a parallel launch past a live child only while this API still owns that run', () => {
@@ -57,5 +59,27 @@ describe('Nautilus log lines that stop a Paper run', () => {
     expect(isFatalNautilusLogLine('[ERROR] PSR-PAPER-001.nautilus_execution::engine: Cannot open NETTING position ADA-PERP.LIGHTER-PSR-001 from fill', true)).toBe(true);
     expect(isFatalNautilusLogLine('[ERROR] PSR-PAPER-001.nautilus_execution::engine: order rejected unexpectedly', true)).toBe(true);
     expect(isFatalNautilusLogLine('Traceback (most recent call last):', true)).toBe(true);
+  });
+});
+
+describe('the watchdog of a run\'s Nautilus child', () => {
+  it('stops a run whose child is silent for a minute while this API keeps ticking', () => {
+    const watch = { lastMessageAt: 0, lastTickAt: 0 };
+    for (let now = 250; now <= CHILD_SILENCE_MS; now += 250) expect(childSilent(watch, now)).toBe(false);
+    expect(childSilent(watch, CHILD_SILENCE_MS + 250)).toBe(true);
+  });
+
+  it('does not count a stall of this API as the child\'s silence (2026-11-12: 132 s, every run stopped)', () => {
+    const watch = { lastMessageAt: 0, lastTickAt: 0 };
+    expect(childSilent(watch, 250)).toBe(false);
+    expect(childSilent(watch, 132_000)).toBe(false);          // the first tick after the block
+    expect(watch.lastMessageAt).toBe(132_000);                 // the clock restarts; the child's lines are read next
+    for (let now = 132_250; now <= 132_000 + CHILD_SILENCE_MS; now += 250) expect(childSilent(watch, now)).toBe(false);
+    expect(childSilent(watch, 132_250 + CHILD_SILENCE_MS)).toBe(true);   // still silent a minute later: dead
+  });
+
+  it('treats a tick just under the stall limit as normal', () => {
+    const watch = { lastMessageAt: 0, lastTickAt: CHILD_SILENCE_MS - API_STALL_MS + 1 };
+    expect(childSilent(watch, CHILD_SILENCE_MS + 1)).toBe(true);
   });
 });

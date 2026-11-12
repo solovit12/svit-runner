@@ -19,6 +19,8 @@ describe('Hyperliquid HIP-3 (xyz) markets', () => {
   it('lists xyz markets after Hyperliquid own markets, with their fee, skipping delisted ones', async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
+      if (body.dex === 'io') return json({ collateralToken: 0, universe: [{ name: 'io:ANTH', szDecimals: 4, deployerFeeScale: '1.0', growthMode: 'enabled' }] });
+      if (body.dex === 'para') return json({ collateralToken: 0, universe: [{ name: 'para:ANTH', szDecimals: 4, deployerFeeScale: '1.0' }] });
       if (body.dex === 'xyz') {
         return json({ collateralToken: 0, universe: [
           { name: 'xyz:NVDA', szDecimals: 3, deployerFeeScale: '1.0', growthMode: 'enabled' },
@@ -29,13 +31,16 @@ describe('Hyperliquid HIP-3 (xyz) markets', () => {
       return json({ universe: [{ name: 'HYPE', szDecimals: 2 }, { name: 'kPEPE', szDecimals: 0 }] });
     });
     const markets = await fetchVenueCatalog('hyperliquid', { fetchImpl: fetchImpl as typeof fetch });
-    expect(markets.map((market) => market.market)).toEqual(['HYPE', 'kPEPE', 'xyz:GOLD', 'xyz:NVDA']);
+    expect(markets.map((market) => market.market)).toEqual(['HYPE', 'io:ANTH', 'kPEPE', 'para:ANTH', 'xyz:GOLD', 'xyz:NVDA']);
+    expect(markets.find((market) => market.market === 'io:ANTH')!.feeMultiplier).toBeCloseTo(0.2);   // growth mode
+    expect(markets.find((market) => market.market === 'para:ANTH')!.feeMultiplier).toBeCloseTo(2);
     const nvda = markets.find((market) => market.market === 'xyz:NVDA')!;
     expect(nvda).toMatchObject({ marketId: 'xyz:NVDA', maxPriceDecimals: 3, sizeStep: 0.001 });
     expect(nvda.feeMultiplier).toBeCloseTo(0.2);
     expect(markets.find((market) => market.market === 'xyz:GOLD')!.feeMultiplier).toBeCloseTo(1.5);
     expect(markets.find((market) => market.market === 'HYPE')!.feeMultiplier).toBe(1);
-    expect(fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([{ type: 'meta' }, { type: 'meta', dex: 'xyz' }]);
+    expect(fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([{ type: 'meta' }, { type: 'meta', dex: 'xyz' },
+      { type: 'meta', dex: 'io' }, { type: 'meta', dex: 'para' }]);
   });
 
   it('includes xyz volumes for ordering the picker', async () => {

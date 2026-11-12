@@ -108,6 +108,13 @@ describe('Paper engine and site as separate processes', () => {
         const stopped = await second.inject({ method: 'POST', url: `/api/paper-experiments/${id}/stop` });
         expect(stopped.statusCode, stopped.body).toBe(200);
         expect(stopped.json().experiment.status).toBe('interrupted');
+        // Delete goes through the site to the engine, with the site's own origin check.
+        const foreignDelete = await second.inject({ method: 'DELETE', url: `/api/paper-experiments/${id}`,
+          headers: { origin: 'https://other.example' } });
+        expect(foreignDelete.statusCode).toBe(403);
+        const deleted = await second.inject({ method: 'DELETE', url: `/api/paper-experiments/${id}` });
+        expect(deleted.statusCode, deleted.body).toBe(200);
+        expect((await second.inject({ method: 'GET', url: `/api/paper-experiments/${id}` })).statusCode).toBe(404);
       } finally { await second.close(); }
     } finally { await engineApp.close(); }
   });
