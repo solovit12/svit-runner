@@ -52,6 +52,22 @@ describe('trade groups', () => {
     expect(groups[0]!.legs.every((leg) => leg.closedAt === null && leg.realizedPnl === 0)).toBe(true);
   });
 
+  it('counts closed positions, wins and gross profit / loss over all groups, a pair as one position', () => {
+    const fills = [...LIVE,
+      // a losing BTC position, then a still open XAU/XAG pair (not counted)
+      fill('2026-11-12T11:00:00.000Z', 'BTC', 'entry', 'long', 0.01, 100_000),
+      fill('2026-11-12T11:30:00.000Z', 'BTC', 'exit', 'long', 0.01, 99_000, -10.5),
+      fill('2026-11-12T12:00:00.000Z', 'XAU', 'entry', 'short', 0.5, 4000),
+      fill('2026-11-12T12:00:00.400Z', 'XAG', 'entry', 'long', 40, 50)];
+    const { stats } = groupTrades(fills, [], 'BRENTOIL/WTI, XAU/XAG');
+    expect(stats).toMatchObject({ closed: 2, wins: 1, partial: false });
+    expect(stats.grossProfit).toBeCloseTo(1.856586, 6);
+    expect(stats.grossLoss).toBeCloseTo(10.5, 9);
+    const unknown = groupTrades([fill('2026-11-12T11:00:00.000Z', 'BTC', 'entry', 'long', 0.01, 100_000),
+      fill('2026-11-12T11:30:00.000Z', 'BTC', 'exit', 'long', 0.01, 99_000)]).stats;
+    expect(unknown).toEqual({ closed: 0, wins: 0, grossProfit: 0, grossLoss: 0, partial: true });
+  });
+
   it('never joins markets of different pairs, nor legs opened more than a minute apart', () => {
     const fills = [
       fill('2026-11-12T12:00:00.000Z', 'BRENTOIL', 'entry', 'long', 1, 90),

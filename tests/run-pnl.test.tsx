@@ -23,14 +23,35 @@ describe('Total PnL per exchange (Runs list)', () => {
       account('Lighter', '990'),
     ] } as unknown as PaperExperimentDetail['runtime'];
     expect(venueTotalPnl({ accounts, tracks, runtime })).toEqual([
-      { venue: 'Hyperliquid', total: 7.5, percent: 0.75 }, { venue: 'Lighter', total: -10, percent: -1 }]);
+      { venue: 'Hyperliquid', total: 7.5, percent: 0.75, balance: 1007.5 },
+      { venue: 'Lighter', total: -10, percent: -1, balance: 990 }]);
     const live = { stage: 'running', fundingTreatment: 'excluded', observedAt: '', accounts: [
       account('Hyperliquid', '100.45', { startBalance: '100.60' }), account('Lighter', '10000')] } as unknown as PaperExperimentDetail['runtime'];
     const [row, ...rest] = venueTotalPnl({ accounts, tracks, runtime: live, live: true });
     expect(rest).toEqual([]);
     expect(row!.venue).toBe('Hyperliquid');
     expect(row!.total).toBeCloseTo(-0.15, 6);
+    expect(row!.balance).toBeCloseTo(100.45, 6);
+    // an older LIVE run without a recorded start still shows its balance
+    const [old] = venueTotalPnl({ accounts, tracks, runtime: { ...live!, accounts: [account('Hyperliquid', '55.5')] }, live: true });
+    expect(old).toEqual({ venue: 'Hyperliquid', total: null, percent: null, balance: 55.5 });
     expect(venueTotalPnl({ accounts, tracks, runtime: undefined })).toEqual([]);
+  });
+
+  it('shows the current balance of every exchange of a LIVE run, and of a Paper run before its first snapshot', () => {
+    const run = { id: 'r1', strategyId: 's', strategyVersion: 1, strategyName: 'Pairs', sourceSha256: 'x', status: 'running',
+      reason: null, createdAt: '2026-11-13T16:15:00Z', startedAt: '2026-11-13T16:15:00Z', endedAt: null, trackCount: 8, live: true,
+      venues: ['Hyperliquid', 'Lighter'], markets: ['XAU'], timeframe: '1m', capitalPerVenue: null,
+      pnl: [{ venue: 'Hyperliquid', total: 1.5, percent: 0.49, balance: 308.5 },
+        { venue: 'Lighter', total: null, percent: null, balance: 1234.5 }] } as PaperExperimentSummary;
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, { experiments: [run], onOpen: () => undefined }));
+    expect(html).toContain('<div><span>Hyperliquid</span> 308.50 USDC</div><div><span>Lighter</span> 1,234.50 USDC</div>');
+    expect(html).not.toContain('>real<');
+    const paper = renderToStaticMarkup(createElement(PaperRunHistory, { experiments: [{ ...run, live: false, pnl: undefined,
+      capitalPerVenue: 10_000 }], onOpen: () => undefined }));
+    expect(paper).toContain('<div><span>Hyperliquid</span> 10,000.00 USDC</div><div><span>Lighter</span> 10,000.00 USDC</div>');
+    const noSnapshot = renderToStaticMarkup(createElement(PaperRunHistory, { experiments: [{ ...run, pnl: undefined }], onOpen: () => undefined }));
+    expect(noSnapshot).toContain('<td class="paper-history-pnl">—</td>');
   });
 
   it('shows the totals of every exchange of a run after its status', () => {

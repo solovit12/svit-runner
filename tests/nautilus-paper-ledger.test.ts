@@ -6,10 +6,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  NautilusPaperLedger, forgetCheckedOutboxesForTests, readNautilusPaperLedgerSnapshot, readNautilusPaperSnapshot,
-  reconcileNautilusPaperOutbox,
+  NautilusPaperLedger, forgetCheckedOutboxesForTests, nautilusOutboxCheckIsCurrent, readNautilusPaperLedgerSnapshot,
+  readNautilusPaperSnapshot, reconcileNautilusPaperOutbox,
 } from '../apps/api/src/paper-execution/nautilus-paper-ledger.js';
-import { readPaperExperimentActivityV1, readPaperExperimentTradesV1 } from '../apps/api/src/paper-execution/paper-experiment-activity.js';
+import { NautilusOutboxChecks, runOutboxCheckWorker } from '../apps/api/src/paper-execution/outbox-check.js';
+import {
+  readPaperExperimentActivityV1, readPaperExperimentTradeStatsV1, readPaperExperimentTradesV1,
+} from '../apps/api/src/paper-execution/paper-experiment-activity.js';
 import { PaperExperimentStoreV1 } from '../apps/api/src/paper-execution/paper-experiment-store.js';
 
 const NAUTILUS_PAPER_MARKETS = ['HYPE', 'SOL', 'XRP', 'SUI', 'DOGE'] as const;
@@ -195,6 +198,26 @@ describe('Nautilus Paper durable ledger', () => {
     expect(trades.groups[0]).toMatchObject({ name: 'HYPE/SOL', realizedPnl: 0.75 });
     expect(trades.groups[0]!.legs.map((one) => [one.market, one.side, one.realizedPnl])).toEqual([
       ['HYPE', 'long', -1.5], ['SOL', 'short', 2.25]]);
+    expect(readPaperExperimentTradeStatsV1({ detail, runtimeDirectory: runs }))
+      .toEqual({ closed: 1, wins: 1, grossProfit: 0.75, grossLoss: 0, partial: false });
+  });
+
+  it('counts closed positions for the list without replaying the outbox; the run page read replays it', () => {
+    const { runs, directory, detail, snapshot } = fixture();
+    const entry = fill(detail.id, 1, 'Lighter', 'f1');
+    const exit = { ...fill(detail.id, 2, 'Lighter', 'f2'), kind: 'exit' as const, side: 'sell' as const, realizedPnl: '-1.5' };
+    const ledger = new NautilusPaperLedger(directory, snapshot);
+    ledger.append({ ...entry, sourceSeq: 1 });
+    ledger.close();
+    outbox(directory, [entry, exit]);
+    childFiles(directory, detail.id, 2_147_483_647);
+    const terminal = { ...detail, status: 'interrupted' as const, endedAt: at };
+    expect(readPaperExperimentTradeStatsV1({ detail: terminal, runtimeDirectory: runs }))
+      .toEqual({ closed: 0, wins: 0, grossProfit: 0, grossLoss: 0, partial: false });
+    expect(readPaperExperimentTradesV1({ detail: terminal, runtimeDirectory: runs }).groups[0]).toMatchObject({ realizedPnl: -1.5 });
+    expect(readPaperExperimentTradeStatsV1({ detail: terminal, runtimeDirectory: runs }))
+      .toEqual({ closed: 1, wins: 0, grossProfit: 0, grossLoss: 1.5, partial: false });
+    expect(readPaperExperimentTradeStatsV1({ detail: terminal, runtimeDirectory: null })).toBeNull();
   });
 
   it('rejects foreign, missing and repeated track facts before any SQLite append', () => {
@@ -409,6 +432,59 @@ describe('Nautilus Paper durable ledger', () => {
     expect(result).toMatchObject({ coverage: 'durable_journal', totalFills: 2 });
     expect(result.fills.map((row) => row.id)).toEqual(['child-fill-2', 'child-fill-1']);
     expect(result.events.some((event) => event.message.includes('Recovered 1 durable Nautilus event'))).toBe(true);
+  });
+
+  it('checks a long outbox in a separate process; afterwards the engine needs only the cheap check', async () => {
+    // 2026-11-13: first opens of stopped runs (25-48 MB outboxes) stalled the engine for 12-21 s.
+    const { directory, runs, detail, snapshot } = fixture();
+    const first = fill(detail.id, 1, 'Lighter', 'child-fill-1');
+    const second = fill(detail.id, 2, 'Hyperliquid', 'child-fill-2');
+    const ledger = new NautilusPaperLedger(directory, snapshot);
+    ledger.append({ ...first, sourceSeq: 1 });
+    ledger.close();
+    outbox(directory, [first, second]);
+    childFiles(directory, detail.id, 2_147_483_647);
+    const terminal = { ...detail, status: 'interrupted' as const, endedAt: at };
+    expect(nautilusOutboxCheckIsCurrent(terminal, directory, 0)).toBe(false);
+    expect(nautilusOutboxCheckIsCurrent(terminal, directory, 1024 * 1024)).toBe(true);   // small: checked inline
+    expect(nautilusOutboxCheckIsCurrent({ ...terminal, status: 'running' }, directory, 0)).toBe(true);
+    expect(await runOutboxCheckWorker(terminal, directory)).toBe(1);
+    forgetCheckedOutboxesForTests();
+    expect(nautilusOutboxCheckIsCurrent(terminal, directory, 0)).toBe(true);
+    expect(readPaperExperimentActivityV1({ detail: terminal, runtimeDirectory: runs })).toMatchObject({ totalFills: 2 });
+    outbox(directory, [first, second, fill(detail.id, 3, 'Lighter', 'child-fill-3')]);
+    expect(nautilusOutboxCheckIsCurrent(terminal, directory, 0)).toBe(false);
+    childFiles(directory, detail.id, process.pid);                                          // the child may still run
+    await expect(runOutboxCheckWorker(terminal, directory)).rejects.toThrow();
+  }, 60_000);
+
+  it('runs one long check per run at a time, shares it between requests and retries a failure later', async () => {
+    const { directory, detail, snapshot } = fixture();
+    const first = fill(detail.id, 1, 'Lighter', 'child-fill-1');
+    const ledger = new NautilusPaperLedger(directory, snapshot);
+    ledger.append({ ...first, sourceSeq: 1 });
+    ledger.close();
+    outbox(directory, [first, fill(detail.id, 2, 'Hyperliquid', 'child-fill-2')]);
+    childFiles(directory, detail.id, 2_147_483_647);
+    const terminal = { ...detail, status: 'interrupted' as const, endedAt: at };
+    let calls = 0;
+    let fail = true;
+    const checks = new NautilusOutboxChecks({ inlineBytes: 0, run: async () => {
+      calls += 1;
+      if (fail) throw new Error('not yet');
+      return 0;
+    } });
+    expect(await Promise.all([checks.ready(terminal, directory), checks.ready(terminal, directory)])).toEqual([false, false]);
+    expect(calls).toBe(1);
+    expect(await checks.ready(terminal, directory)).toBe(false);          // within the retry pause: no new check
+    expect(calls).toBe(1);
+    const later = new NautilusOutboxChecks({ inlineBytes: 0, run: async () => { calls += 1; return 0; } });
+    fail = false;
+    expect(await Promise.all([later.ready(terminal, directory), later.ready(terminal, directory)])).toEqual([true, true]);
+    expect(await later.ready(terminal, directory)).toBe(true);
+    expect(calls).toBe(2);
+    expect(await later.ready({ ...terminal, status: 'running', endedAt: null }, directory)).toBe(true);
+    expect(calls).toBe(2);
   });
 
   it('checks a stopped run\'s outbox once: after an API restart the saved check is used until a file changes', () => {

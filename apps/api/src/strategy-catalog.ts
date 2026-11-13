@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   normalizedBacktestSettings,
   PaperStrategySettingsSchema,
+  SaveStrategyVersionSchema,
   StrategyCatalogMetadataSchema,
   type CreateStrategyInput,
   type SaveStrategyVersionInput,
@@ -251,6 +252,38 @@ export class StrategyCatalogV1 {
         .run(input.name, nextVersion, timestamp, id);
     });
     return this.get(id)!;
+  }
+
+  /**
+   * The version a run stopped by a server shutdown starts again from. Saving replaces older
+   * versions, so a run launched before the latest save no longer has its version here: its own
+   * pinned source and settings are then saved as the next version, as a launch from the site does.
+   * Null when the strategy itself was deleted.
+   */
+  versionForRun(run: {
+    readonly strategyId: string;
+    readonly strategyVersion: number;
+    readonly source: string;
+    readonly sourceSha256: string;
+    readonly settings: unknown;
+  }): StrategyDetail | null {
+    const same = (detail: StrategyDetail | null): detail is StrategyDetail => detail !== null
+      && detail.version.sourceSha256 === run.sourceSha256
+      && JSON.stringify(detail.version.paperSettings) === JSON.stringify(run.settings);
+    const pinned = this.get(run.strategyId, run.strategyVersion);
+    if (same(pinned)) return pinned;
+    const latest = this.get(run.strategyId);
+    if (!latest) return null;
+    const saved = this.saveVersion(run.strategyId, SaveStrategyVersionSchema.parse({
+      name: latest.version.name,
+      source: run.source,
+      backtestSettings: latest.version.backtestSettings,
+      paperSettings: run.settings,
+      metadata: latest.version.metadata,
+      expectedVersion: latest.version.version,
+    }));
+    if (!same(saved)) throw new StrategyCatalogError('INVALID_CATALOG', 'The run copy changed while it was saved again.');
+    return saved;
   }
 
   /** Removes a strategy from the library. Paper runs already started keep their own copy. */

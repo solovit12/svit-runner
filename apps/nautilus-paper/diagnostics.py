@@ -27,7 +27,6 @@ PREFIX = "Paper diagnostic: "
 FLUSH_INTERVAL_NS = 30_000_000_000
 MAX_MESSAGE_CHARS = 2048
 MAX_PARTS_PER_BATCH = 64
-MAX_MESSAGES_PER_FLUSH = 2 * MAX_PARTS_PER_BATCH
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 SCOPES = frozenset({"bridge_quote", "bridge_book", "quote", "book", "entry", "exit"})

@@ -3,12 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   EXACT_DECIMAL_ZERO,
   addExactDecimals,
-  assertExactMultipleOfStep,
   compareExactDecimals,
   divideExactDecimalsToScale,
   formatExactDecimal,
-  isExactMultipleOfStep,
-  minExactDecimal,
   multiplyExactDecimals,
   parseExactDecimal,
   subtractExactDecimals,
@@ -77,26 +74,6 @@ describe('Paper Broker exact decimal foundation', () => {
       'Cannot divide by zero',
     );
     expect(() => divideExactDecimalsToScale(decimal('1'), decimal('2'), -1, 'half-up')).toThrow(RangeError);
-  });
-
-  it('returns the exact minimum across signs and scales', () => {
-    expect(text(minExactDecimal(decimal('1.200'), decimal('1.19')))).toBe('1.19');
-    expect(text(minExactDecimal(decimal('-1.2'), decimal('-1.19')))).toBe('-1.2');
-    expect(text(minExactDecimal(decimal('0'), decimal('0.000')))).toBe('0');
-  });
-
-  it('validates exact quantity and tick-size multiples after scale alignment', () => {
-    expect(isExactMultipleOfStep(decimal('1.25'), decimal('0.05'))).toBe(true);
-    expect(isExactMultipleOfStep(decimal('1.2500'), decimal('0.010'))).toBe(true);
-    expect(isExactMultipleOfStep(decimal('1.26'), decimal('0.05'))).toBe(false);
-    expect(isExactMultipleOfStep(decimal('-1.25'), decimal('0.05'))).toBe(true);
-    expect(isExactMultipleOfStep(EXACT_DECIMAL_ZERO, decimal('0.05'))).toBe(true);
-    expect(() => assertExactMultipleOfStep(decimal('2.5'), decimal('0.5'))).not.toThrow();
-    expect(() => assertExactMultipleOfStep(decimal('2.51'), decimal('0.5'))).toThrow(
-      '2.51 is not an exact multiple of step 0.5',
-    );
-    expect(() => isExactMultipleOfStep(decimal('1'), decimal('0'))).toThrow('step must be greater than zero');
-    expect(() => isExactMultipleOfStep(decimal('1'), decimal('-0.1'))).toThrow('step must be greater than zero');
   });
 
   it('rejects malformed ExactDecimal objects instead of coercing them', () => {

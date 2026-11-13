@@ -4,8 +4,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { PineLivePaperSettingsV1, StrategyDetail } from '../packages/shared/src/strategy-catalog-contracts';
 import {
-  DEFAULT_PAPER_FEES, PaperRunsPreview, PaperSetupPreview, baseMarket, paperSettingsEqual, paramError, parseMarketList, parseParam, rankMarkets,
-  validPaperSettings,
+  DEFAULT_PAPER_FEES, PaperRunsPreview, PaperSetupPreview, baseMarket, copyableRunSettings, paperSettingsEqual, paramError, parseMarketList,
+  parseParam, rankMarkets, validPaperSettings,
 } from '../apps/web/src/components/PaperScreens';
 import { findSavedPythonStrategy, pythonStrategySource } from '../apps/web/src/lib/python-strategy-library';
 import { createHash } from 'node:crypto';
@@ -187,6 +187,33 @@ describe('generic Pine Paper setup', () => {
     expect(setup).not.toContain('aria-label="Strategy type" disabled=""');
     expect(setup).toContain('Python strategy');
     expect(setup).toContain('Start saves this strategy and its settings in the library');
+  });
+
+  it('Run Duplicate fills the form with the copied run, over the strategy\'s own saved settings', () => {
+    const python = { ...settings, accountModel: 'python_live_v1' as const, strategyRef: 'examples/pair_reversion:PairReversion',
+      params: { pairs: 'CRWV/NBIS', entry_bp: 50 }, timeframe: '1m' as const, capitalPerVenue: 25_000, orderSizePercent: 7,
+      tracks: [{ venue: 'Lighter' as const, market: 'CRWV' }, { venue: 'Lighter' as const, market: 'NBIS' }] };
+    const duplicate = { key: 1, runId: '9a26e606-078a-4e2a-adb7-0ef2c6410732', strategyName: 'Pair reversion Live', live: false, settings: python };
+    const tab = renderToStaticMarkup(createElement(PaperSetupPreview, {
+      source: 'strategy("Breakout")', fromBacktest: false, fromEditor: true, strategies: [], savedStrategy, catalogBusy: false,
+      ...callbacks, embedded: true, duplicate,
+    }));
+    expect(tab).toContain('Settings copied from run 9a26e606 (Pair reversion Live).');
+    expect(tab).toContain('press Start Paper');
+    expect(tab).toContain('value="25000"');
+    expect(tab).toContain('value="7"');
+    expect(tab).toContain('CRWV');
+    expect(tab).not.toContain('kPEPE'); // the editor strategy's own saved markets do not come back
+    expect(tab).toMatch(/<option value="python"[^>]* selected="">Python strategy/);
+    expect(tab).toContain('<option value="1m" selected="">');
+    const live = renderToStaticMarkup(createElement(PaperSetupPreview, {
+      source: '', fromBacktest: false, strategies: [], savedStrategy: null, catalogBusy: false, ...callbacks, embedded: true,
+      duplicate: { ...duplicate, key: 2, live: true },
+    }));
+    expect(live).toContain('(Pair reversion Live, LIVE)');
+    expect(live).toContain('the real-money box needs a tick again');
+    expect(copyableRunSettings(python)).toBe(python);
+    expect(copyableRunSettings({ accountModel: 'venue_shared_v2' })).toBeNull();
   });
 
   it('orders the market picker by match quality, then 24 h volume, and hides chosen markets', () => {

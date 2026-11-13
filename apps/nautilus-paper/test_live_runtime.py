@@ -785,7 +785,7 @@ async def position_check_halts_on_a_difference():
 def refusals_follow_the_lighter_table():
     """Lighter's error codes decide: pause and count, pause entries, wait for confirmation or halt."""
     import runtime
-    classify = runtime.classify_live_refusal
+    from live_venues import classify_live_refusal as classify, lighter_error_code
     assert classify("LIGHTER_21739: not enough margin to create the order") == "refused"
     assert classify("Lighter sequencer rejected acknowledged create transaction 0x1: reduce only increases position") == "refused"
     assert classify("Lighter submit_order dispatch failed: Transport(Closed)") == "refused"  # never sent
@@ -797,7 +797,7 @@ def refusals_follow_the_lighter_table():
     for halt in ("LIGHTER_21112: account is in liquidation", "LIGHTER_52002: only reducing", "LIGHTER_21702: invalid price"):
         assert classify(halt) == "halt", halt
     assert classify("LIGHTER_99999: something new") == "unknown"
-    assert runtime.lighter_error_code("Lighter sequencer rejected acknowledged create transaction 0x2: "
+    assert lighter_error_code("Lighter sequencer rejected acknowledged create transaction 0x2: "
                                       "SL/TP order price is too far from the trigger price") == 21735
     assert classify("an unexpected text") == "unknown"
 
@@ -877,6 +877,9 @@ def hyperliquid_refusals_and_account():
             {"position": {"coin": "BTC", "szi": "0.0", "unrealizedPnl": "0"}}]},
         "xyz": {"marginSummary": {"accountValue": "30"}, "assetPositions": [
             {"position": {"coin": "xyz:NVDA", "szi": "0.2", "unrealizedPnl": "-0.75"}}]},
+        # the HIP-3 exchanges io and para (2026-11-12): empty accounts
+        "io": {"marginSummary": {"accountValue": "0"}, "assetPositions": []},
+        "para": {"marginSummary": {"accountValue": "0"}, "assetPositions": []},
     }
     answers["mode"] = "default"
     answers["spot"] = {"balances": [{"coin": "USDC", "total": "99.5"}, {"coin": "USDE", "total": "0.0"}]}
@@ -894,7 +897,7 @@ def hyperliquid_refusals_and_account():
         account = venue.read_account()
     finally:
         live_venues.hyperliquid_info = original
-    assert [body.get("dex") for body in asked if body["type"] == "clearinghouseState"] == [None, "xyz"]
+    assert [body.get("dex") for body in asked if body["type"] == "clearinghouseState"] == [None, "xyz", "io", "para"]
     assert asked[0] == {"type": "userAbstraction", "user": venue.address}
     assert account["equity"] == Decimal("150.5") and account["cash"] == Decimal("150.0"), account
     assert account["positions"] == {"hyperliquid:SOL": (Decimal("-0.5"), Decimal("1.25")),

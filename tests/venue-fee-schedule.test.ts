@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   HYPERLIQUID_BASE_PERPETUAL_FEES,
   LIGHTER_STANDARD_PERPETUAL_FEES,
-  defaultPaperTakerFeeRate,
   defaultPerpetualFeeSchedule,
   feeRateFractionToPercent,
 } from '../packages/shared/src/venue-fee-schedule.js';
@@ -29,7 +28,7 @@ describe('venue fee schedules', () => {
       takerFeeRate: '0',
       historicalAssumption: true,
     });
-    expect(defaultPaperTakerFeeRate('lighter')).toBe('0');
+    expect(defaultPerpetualFeeSchedule('lighter').takerFeeRate).toBe('0');
   });
 
   it('routes the two venues without sharing or mutating a schedule', () => {

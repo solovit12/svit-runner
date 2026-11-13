@@ -1,5 +1,5 @@
 import type { BacktestReport } from '../../../../packages/shared/src/report-contracts';
-import { conditionsText, periodDays, ruDate, signed } from './backtest-report';
+import { conditionsText, number, periodDays, ruDate, signed } from './backtest-report';
 
 /** The picture for the Telegram post: 1080×1350 (fills a phone screen), the app's dark colors, Russian. */
 export const REPORT_IMAGE_SIZE = { width: 1080, height: 1350 } as const;
@@ -12,7 +12,6 @@ const SANS = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto
 const MONO = '"Cascadia Code", "SF Mono", Menlo, Consolas, monospace';
 const PAD = 72;
 
-const number = (value: number, digits = 2) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(value);
 
 /** Lines that fit the width, at most `maxLines`, the last one cut with "…" when the text is longer. */
 function wrap(ctx: CanvasRenderingContext2D, text: string, width: number, maxLines: number): string[] {

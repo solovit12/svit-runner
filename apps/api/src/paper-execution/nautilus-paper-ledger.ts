@@ -15,6 +15,7 @@ import type {
   PaperExperimentDetail,
   PaperExperimentRuntimeView,
   PaperExperimentTrades,
+  PaperRunTradeStats,
 } from '../../../../packages/shared/src/paper-experiment-contracts.js';
 import type { PaperExperimentSnapshot } from './paper-experiment-store.js';
 import { groupTrades } from './paper-trade-groups.js';
@@ -553,6 +554,30 @@ export function reconcileNautilusPaperOutbox(
   } finally { db.close(); }
 }
 
+/**
+ * Whether reading this ended run needs no long outbox check: no journal or outbox, an outbox
+ * small enough to check inline, or a saved check that still matches. A long check runs in a
+ * separate process instead (outbox-check.ts), so the engine never stalls on it.
+ */
+export function nautilusOutboxCheckIsCurrent(detail: PaperExperimentDetail, directory: string, inlineBytes: number): boolean {
+  if (detail.status !== 'completed' && detail.status !== 'interrupted') return true;
+  try {
+    if (!checkedFile(directory, false)) return true;
+    const outboxFile = checkedCompanionIdentity(directory, OUTBOX_FILE, MAX_OUTBOX_BYTES);
+    if (!outboxFile || outboxFile.identity.size <= inlineBytes) return true;
+    const cached = recoveredOutboxes.get(path.resolve(directory)) ?? savedReconciliation(directory, detail.id);
+    if (!cached || canonical(cached.outbox) !== canonical(outboxFile.identity)) return false;
+    const read = openReadOnly(directory, bindingFromDetail(detail));
+    if (!read) return false;
+    try {
+      const count = read.prepare('SELECT COUNT(*) AS n FROM nautilus_records').get() as { n: number };
+      return count.n === cached.ledgerRows;
+    } finally { read.close(); }
+  } catch {
+    return false;
+  }
+}
+
 /** Tests only: forget the in-memory outbox checks, as a restart of this API does. */
 export function forgetCheckedOutboxesForTests(): void {
   recoveredOutboxes.clear();
@@ -767,9 +792,28 @@ export function readNautilusPaperTrades(detail: PaperExperimentDetail, directory
   if (detail.status === 'completed' || detail.status === 'interrupted') {
     reconcileNautilusPaperOutbox(detail, directory);
   }
+  return groupedTrades(detail, directory)?.trades ?? { groups: [], truncated: false, coverage: 'control_only' };
+}
+
+/**
+ * Closed positions of a run for the runs list: what the journal holds now, never replaying an
+ * ended run's outbox (that can block the engine for minutes); the run's own page does that.
+ */
+export function readNautilusPaperTradeStats(detail: PaperExperimentDetail, directory: string): PaperRunTradeStats | null {
+  // The list caches an ended run's count itself; its fills need not stay in memory.
+  const kept = tradeCache.has(detail.id);
+  try {
+    return groupedTrades(detail, directory)?.stats ?? null;
+  } finally {
+    if (!kept && detail.endedAt) tradeCache.delete(detail.id);
+  }
+}
+
+function groupedTrades(detail: PaperExperimentDetail, directory: string):
+  { readonly trades: PaperExperimentTrades; readonly stats: PaperRunTradeStats } | null {
   const expected = bindingFromDetail(detail);
   const db = openReadOnly(directory, expected);
-  if (!db) return { groups: [], truncated: false, coverage: 'control_only' };
+  if (!db) return null;
   try {
     const head = db.prepare("SELECT COUNT(*) AS n, COALESCE(MAX(seq), 0) AS last FROM nautilus_records WHERE type = 'fill'")
       .get() as { n: number; last: number };
@@ -787,8 +831,12 @@ export function readNautilusPaperTrades(detail: PaperExperimentDetail, directory
       tradeCache.set(detail.id, cached);
     }
     const panels = latestSnapshot(db, expected)?.panels ?? [];
-    const { groups, truncated } = groupTrades(cached.fills, panels, detail.params?.pairs);
-    return { groups, truncated: truncated || head.n > MAX_GROUPED_FILLS, coverage: 'durable_journal' };
+    const { groups, truncated, stats } = groupTrades(cached.fills, panels, detail.params?.pairs);
+    const cut = head.n > MAX_GROUPED_FILLS;
+    return {
+      trades: { groups, truncated: truncated || cut, coverage: 'durable_journal' },
+      stats: cut ? { ...stats, partial: true } : stats,
+    };
   } finally { db.close(); }
 }
 

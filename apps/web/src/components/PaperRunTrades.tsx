@@ -1,19 +1,12 @@
 import { useState } from 'react';
 import type { PaperExperimentTrades, PaperStrategyPanel, PaperTradeGroup } from '../lib/api';
+import { formatDate, pnlClass } from '../lib/format';
 import { InfoTooltip } from './TranslatedText';
 
 const GROUPS_SHOWN = 10;
 
 function signed(value: number, digits = 2): string {
   return `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value).toFixed(digits)}`;
-}
-
-function tone(value: number | null | undefined): string {
-  return value === null || value === undefined ? '' : value > 0 ? 'paper-pnl-up' : value < 0 ? 'paper-pnl-down' : '';
-}
-
-function when(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—';
 }
 
 function price(value: number | null): string {
@@ -49,11 +42,11 @@ export function PaperStrategyPanels({ panels }: { panels: readonly PaperStrategy
             {share < 0
               ? <span>against the trade: <b className="paper-pnl-down">{signed(progress.value, 1)} {progress.unit}</b>{progress.stop !== undefined
                 ? <> · stop at {signed(progress.stop, 0)} {progress.unit}: {Math.round((toStop ?? 0) * 100)} % of the way</> : ''} · {progress.label} {progress.target.toFixed(1)} {progress.unit}</span>
-              : <span>{progress.label}: <b className={tone(progress.value)}>{signed(progress.value, 1)}</b> of {progress.target.toFixed(1)} {progress.unit} · {Math.round(share * 100)} %</span>}
+              : <span>{progress.label}: <b className={pnlClass(progress.value)}>{signed(progress.value, 1)}</b> of {progress.target.toFixed(1)} {progress.unit} · {Math.round(share * 100)} %</span>}
             {(progress.leftPercent !== undefined || progress.leftUsd !== undefined) && <span>left:
               {progress.leftPercent !== undefined && <b> {progress.leftPercent.toFixed(2)} %</b>}
               {progress.leftUsd !== undefined && <b> ≈ {progress.leftUsd.toFixed(2)} USDC</b>}</span>}
-            {progress.usd !== undefined && <span>now <b className={tone(progress.usd)}>{signed(progress.usd)} USDC</b></span>}
+            {progress.usd !== undefined && <span>now <b className={pnlClass(progress.usd)}>{signed(progress.usd)} USDC</b></span>}
           </p>
         </>}
         {panel.lines.length > 0 && <ul>{panel.lines.map((line, index) => <li key={index}>{line}</li>)}</ul>}
@@ -68,10 +61,10 @@ function GroupRows({ group, nowMs }: { group: PaperTradeGroup; nowMs: number }) 
     <tr className="paper-trade-group">
       <td colSpan={9}>
         <strong>{group.name}</strong>
-        <span>{pair ? 'pair' : 'position'} · opened {when(group.openedAt)}</span>
-        <span>{group.closedAt ? `closed ${when(group.closedAt)}` : <b className="paper-trade-open">open</b>}</span>
+        <span>{pair ? 'pair' : 'position'} · opened {formatDate(group.openedAt)}</span>
+        <span>{group.closedAt ? `closed ${formatDate(group.closedAt)}` : <b className="paper-trade-open">open</b>}</span>
         <span>held {lasted(group.openedAt, group.closedAt, nowMs)}</span>
-        {group.closedAt !== null && group.realizedPnl !== null && <span>result <b className={tone(group.realizedPnl)}>{signed(group.realizedPnl)} USDC</b></span>}
+        {group.closedAt !== null && group.realizedPnl !== null && <span>result <b className={pnlClass(group.realizedPnl)}>{signed(group.realizedPnl)} USDC</b></span>}
         {group.fees > 0 && <span>fees <b>{group.fees.toFixed(2)} USDC</b></span>}
       </td>
     </tr>
@@ -82,9 +75,9 @@ function GroupRows({ group, nowMs }: { group: PaperTradeGroup; nowMs: number }) 
       <td>{price(leg.entryPrice)}</td>
       <td>{leg.closedAt ? price(leg.exitPrice) : '—'}</td>
       <td>{leg.entryValue.toFixed(2)} USDC</td>
-      <td className={tone(leg.realizedPnl)}>{leg.closedAt === null && !leg.realizedPnl ? 'open' : leg.realizedPnl === null ? '—' : `${signed(leg.realizedPnl)} USDC`}</td>
+      <td className={pnlClass(leg.realizedPnl)}>{leg.closedAt === null && !leg.realizedPnl ? 'open' : leg.realizedPnl === null ? '—' : `${signed(leg.realizedPnl)} USDC`}</td>
       <td>{leg.fills}</td>
-      <td>{leg.closedAt ? when(leg.closedAt) : '—'}</td>
+      <td>{leg.closedAt ? formatDate(leg.closedAt) : '—'}</td>
     </tr>)}
   </tbody>;
 }
@@ -104,7 +97,7 @@ export function PaperTradeGroups({ trades, live = false, nowMs = Date.now() }: {
         en={`Every ${live ? 'real' : 'virtual'} fill belongs to a position of its market, from the first entry until the market is flat again. The legs of one pair (opened within a minute, the pairs of the strategy) are shown together with their sum. Result = realized PnL of the exit fills; fees as charged; funding is not included.`}
         ru={`Каждое ${live ? 'реальное' : 'условное'} исполнение относится к позиции своего рынка — от первого входа до момента, когда позиция снова пуста. Ноги одной пары (открытые в пределах минуты, пары стратегии) показаны вместе и с суммой. Результат — реализованный PnL выходов; комиссии как списаны; funding не входит.`} /></h2>
       <p>{trades === null ? 'Loading…' : closed.length
-        ? <>Closed: {closed.length} · wins {wins} · result <b className={tone(total)}>{signed(total)} USDC</b>{trades.truncated ? ' · the oldest are not listed' : ''}</>
+        ? <>Closed: {closed.length} · wins {wins} · result <b className={pnlClass(total)}>{signed(total)} USDC</b>{trades.truncated ? ' · the oldest are not listed' : ''}</>
         : 'No closed positions yet'}</p></div></div>
     {trades !== null && trades.coverage !== 'durable_journal' && <p className="paper-activity-warning" role="status">
       The run journal could not be read completely; positions may be missing.</p>}

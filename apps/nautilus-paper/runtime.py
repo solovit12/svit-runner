@@ -42,9 +42,7 @@ from nautilus_trader.model import (
 from data_bridge import (
     OfflineSourceFactory, PaperFeedFactory, PublicBridge, SPECS, USDC, make_specs, track_key,
 )
-from live_venues import (  # noqa: F401 (classify_live_refusal, lighter_error_code: kept for the tests)
-    REAL_VENUES, LighterVenue, SandboxVenue, classify_live_refusal, lighter_error_code,
-)
+from live_venues import REAL_VENUES, LighterVenue, SandboxVenue
 from pine_orders import PineOrderManager, outward_price
 from psr_sdk import Instrument, resolve_params
 from psr_sdk.packs import load_strategy

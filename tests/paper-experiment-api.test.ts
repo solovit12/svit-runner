@@ -404,6 +404,49 @@ describe('Paper experiment control API', () => {
     } finally { await next.close(); }
   });
 
+  it('starts a shutdown run again from its own copy after the strategy was saved again', async () => {
+    // Tokyo 2026-11-13: an automatic system update restarted the engine; only the run launched
+    // from the latest save came back, the three launched from older (replaced) versions did not.
+    const root = await tempRoot();
+    const dirs = { strategyCatalogDir: path.join(root, 'catalog'), paperExperimentsDir: path.join(root, 'paper') };
+    const started: { id: string; source: string; capital: unknown; version: number }[] = [];
+    const factory: PaperExperimentRuntimeFactory = {
+      preflight: async () => undefined,
+      abortStart: async () => interruptedStopProof,
+      start: async (snapshot) => {
+        started.push({ id: snapshot.experimentId, source: snapshot.source, version: snapshot.strategyVersion,
+          capital: 'capitalPerVenue' in snapshot.settings ? snapshot.settings.capitalPerVenue : null });
+        return { stop: async (reason?: string) => ({ ...interruptedStopProof, reason: reason ?? 'x' }) };
+      },
+    };
+    let strategyId = '';
+    let older = '';
+    const changed = { ...settings, capitalPerVenue: 5_000 };
+    const app = await buildApp({ ...dirs, paperRuntimeFactory: factory });
+    try {
+      strategyId = await saveStrategy(app);
+      older = (await app.inject({ method: 'POST', url: '/api/paper-experiments', payload: launch(strategyId) })).json().experiment.id;
+      const saved = await app.inject({ method: 'POST', url: `/api/strategies/${strategyId}/versions`, payload: {
+        name: 'Pilot', source: `${source}\n// changed`, backtestSettings, paperSettings: changed, expectedVersion: 1,
+      } });
+      expect(saved.statusCode, saved.body).toBe(201);
+      expect((await app.inject({ method: 'GET', url: `/api/strategies/${strategyId}/versions/1` })).statusCode).toBe(404);
+    } finally { await app.close(); }
+
+    const next = await buildApp({ ...dirs, paperRuntimeFactory: factory });
+    try {
+      await next.ready();
+      await vi.waitFor(() => expect(started).toHaveLength(2));
+      expect(started[1]).toMatchObject({ source, capital: 10_000, version: 3 });
+      const runs = (await next.inject({ method: 'GET', url: '/api/paper-experiments' })).json().experiments as
+        { id: string; status: string; strategyVersion: number; sourceSha256: string }[];
+      expect(runs.find(run => run.id === older)).toMatchObject({ status: 'interrupted', strategyVersion: 1 });
+      expect(runs.find(run => run.id === started[1]!.id)).toMatchObject({ strategyVersion: 3, sourceSha256: hash });
+      const current = (await next.inject({ method: 'GET', url: `/api/strategies/${strategyId}` })).json();
+      expect(current.version).toMatchObject({ version: 3, source, paperSettings: settings });
+    } finally { await next.close(); }
+  });
+
   it('does not resume a shutdown run after the resume window', async () => {
     const root = await tempRoot();
     const dirs = { strategyCatalogDir: path.join(root, 'catalog'), paperExperimentsDir: path.join(root, 'paper') };

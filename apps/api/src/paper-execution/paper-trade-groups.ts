@@ -1,5 +1,6 @@
 import type {
   PaperExperimentActivityFill,
+  PaperRunTradeStats,
   PaperStrategyPanel,
   PaperTradeGroup,
   PaperTradeLeg,
@@ -35,7 +36,8 @@ function finish(leg: LegState): PaperTradeLeg {
  * the pairs of its `pairs` parameter ("BRENTOIL/WTI, XAU/XAG"). A market in no pair stays a group of its own.
  */
 export function groupTrades(fills: readonly PaperExperimentActivityFill[],
-  panels: readonly PaperStrategyPanel[] = [], pairsParam?: unknown): { groups: PaperTradeGroup[]; truncated: boolean } {
+  panels: readonly PaperStrategyPanel[] = [], pairsParam?: unknown,
+): { groups: PaperTradeGroup[]; truncated: boolean; stats: PaperRunTradeStats } {
   const legs: LegState[] = [];
   const open = new Map<string, LegState>();
   for (const fill of fills) {
@@ -95,7 +97,24 @@ export function groupTrades(fills: readonly PaperExperimentActivityFill[],
       realizedPnl: pnl, fees: order.reduce((sum, leg) => sum + leg.fees, 0), legs: order,
     };
   }).reverse();
-  return { groups: shaped.slice(0, MAX_TRADE_GROUPS), truncated: shaped.length > MAX_TRADE_GROUPS };
+  return { groups: shaped.slice(0, MAX_TRADE_GROUPS), truncated: shaped.length > MAX_TRADE_GROUPS, stats: tradeStats(shaped) };
+}
+
+/** Closed positions, wins and gross profit / loss over every group (not only the ones the list keeps). */
+export function tradeStats(groups: readonly PaperTradeGroup[]): PaperRunTradeStats {
+  let closed = 0;
+  let wins = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
+  let partial = false;
+  for (const group of groups) {
+    if (group.closedAt === null) continue;
+    if (group.realizedPnl === null || !Number.isFinite(group.realizedPnl)) { partial = true; continue; }
+    closed += 1;
+    if (group.realizedPnl > 0) { wins += 1; grossProfit += group.realizedPnl; }
+    else grossLoss -= group.realizedPnl;
+  }
+  return { closed, wins, grossProfit, grossLoss, partial };
 }
 
 /** "BRENTOIL/WTI, XAU/XAG" -> [["BRENTOIL", "WTI"], ["XAU", "XAG"]]; anything else -> []. */

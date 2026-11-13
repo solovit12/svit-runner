@@ -483,11 +483,12 @@ export class PaperExperimentControllerV1 {
   }
 
   /**
-   * Start again the runs that the previous engine stopped for a server shutdown: same saved
-   * strategy version and settings, a new run. Only an orderly shutdown within the window
-   * qualifies; the file is removed first, so a failing start is never retried in a loop.
+   * Start again the runs that the previous engine stopped for a server shutdown: the run's own
+   * pinned source and settings, a new run. `saved` gives the library version holding exactly that
+   * copy (saving it again when the strategy was saved since). Only an orderly shutdown within the
+   * window qualifies; the file is removed first, so a failing start is never retried in a loop.
    */
-  async resumeAfterRestart(saved: (strategyId: string, version: number) => StrategyDetail | null): Promise<ResumeAfterRestartResult[]> {
+  async resumeAfterRestart(saved: (run: PaperExperimentSnapshot) => StrategyDetail | null): Promise<ResumeAfterRestartResult[]> {
     if (!this.#directory || !this.#store || !this.#factory) return [];
     const file = path.join(this.#directory, RESUME_FILE);
     let entry: { at?: unknown; ids?: unknown };
@@ -508,10 +509,16 @@ export class PaperExperimentControllerV1 {
           results.push({ stoppedId, error: 'not stopped by a server shutdown' });
           continue;
         }
-        const strategy = saved(stopped.strategyId, stopped.strategyVersion);
+        // The run's own pinned copy decides what starts again, not whatever the library holds now.
+        const run = this.#store.snapshot(stoppedId);
+        const strategy = run ? saved(run) : null;
+        if (!run || !strategy) {
+          results.push({ stoppedId, error: 'the strategy of this run is no longer in the library' });
+          continue;
+        }
         const request = StartPaperExperimentSchema.parse({
-          strategyId: stopped.strategyId, version: stopped.strategyVersion, sourceSha256: stopped.sourceSha256,
-          settings: strategy?.version.paperSettings, idempotencyKey: randomUUID(),
+          strategyId: strategy.strategy.id, version: strategy.version.version, sourceSha256: strategy.version.sourceSha256,
+          settings: strategy.version.paperSettings, idempotencyKey: randomUUID(),
         });
         const { experiment } = await this.start(request, strategy, { resumed: true });
         results.push({ stoppedId, resumedId: experiment.id });

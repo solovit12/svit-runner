@@ -341,7 +341,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   const paperRuntimeFactory = role === 'site' ? null : options.paperRuntimeFactory !== undefined
     ? options.paperRuntimeFactory
     : process.env.NODE_ENV !== 'production'
-      && (process.env.PAPER_ENABLED === '1' || process.env.PAPER_HLL_HYPE_PILOT_ENABLED === '1')
+      && process.env.PAPER_ENABLED === '1'
       && strategyCatalogDir && paperExperimentsDir
       ? (() => {
         const shared = {
@@ -394,7 +394,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     app.addHook('onReady', async () => {
       const catalog = getStrategyCatalog();
       if (!catalog) return;
-      void paperExperiments.resumeAfterRestart((id, version) => catalog.get(id, version)).then((results) => {
+      void paperExperiments.resumeAfterRestart((run) => catalog.versionForRun(run)).then((results) => {
         for (const result of results) {
           if (result.resumedId) app.log.info(result, 'Paper run resumed after a server restart');
           else app.log.warn(result, 'Paper run was not resumed after a server restart');
@@ -1242,6 +1242,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
       if (request.url.startsWith('/api/')) {
         return reply.code(404).send({ error: bilingualMessage('Not found.', 'Не найдено.') });
       }
+      // A script or style of an older build (a tab opened before an update) is gone: say so plainly
+      // instead of answering with the page, so the site can reload itself.
+      if (request.url.startsWith('/assets/')) return reply.code(404).type('text/plain').send('Not found.');
       return reply.sendFile('index.html');
     });
   }

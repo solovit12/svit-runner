@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, Plus, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, ArrowRight, Copy, Plus, X } from 'lucide-react';
 import { runPath } from '../lib/run-paths';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { readPaperDraft, writePaperDraft } from '../lib/editor-draft';
@@ -52,6 +52,23 @@ function isPythonLive(settings: unknown): settings is PythonLivePaperSettingsV1 
 
 function isLive(settings: unknown): settings is LiveSettings {
   return isPineLive(settings) || isPythonLive(settings);
+}
+
+/**
+ * Run Duplicate on the Runs page (owner 2026-11-12): the launch page opens with one run's settings.
+ * `key` changes on every press, so pressing it again fills the form again.
+ */
+export interface PaperDuplicate {
+  readonly key: number;
+  readonly runId: string;
+  readonly strategyName: string;
+  readonly live: boolean;
+  readonly settings: LiveSettings;
+}
+
+/** A run's settings the launch page can take (runs of the current Pine and Python launch); null for older runs. */
+export function copyableRunSettings(settings: unknown): LiveSettings | null {
+  return isLive(settings) ? settings : null;
 }
 
 /** Text field value -> typed parameter (NaN / '' surface as validation errors). */
@@ -171,6 +188,8 @@ type PaperSetupProps = {
   edition?: Edition;
   /** A tab of the Strategy page: the editor is the strategy, so there is no own heading or source choice. */
   embedded?: boolean;
+  /** Run Duplicate: these settings fill the form (over a restored draft and the strategy's saved settings). */
+  duplicate?: PaperDuplicate | null;
 };
 
 const usd = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
@@ -317,17 +336,18 @@ function MarketPicker({ venue, otherVenue, options, otherOptions, volumes, feeMu
 }
 
 export function PaperSetupPreview({ source, fromBacktest, fromEditor = fromBacktest, backtestTimeframe, backtestSymbol, strategies, savedStrategy, catalogBusy,
-  onSelectStrategy, onPrepareVersion, onBack, onRuns, onAccounts, edition = EDITION, embedded = false }: PaperSetupProps) {
+  onSelectStrategy, onPrepareVersion, onBack, onRuns, onAccounts, edition = EDITION, embedded = false, duplicate = null }: PaperSetupProps) {
   const pythonAllowed = pythonStrategiesAvailable(edition);
   // Coming from a fresh backtest of other code, the editor leads: another saved
   // strategy's type, timeframe and markets must not be carried over.
   const startsFromEditor = !savedStrategy || (fromEditor && savedStrategy.version.source !== source);
   const saved = !startsFromEditor && isLive(savedStrategy?.version.paperSettings)
     ? savedStrategy!.version.paperSettings as LiveSettings : null;
-  const initial = saved && isPythonLive(saved) && !pythonAllowed ? null : saved;
-  // Settings changed before a page reload come back first (the Strategy page's Paper tab only).
+  const copied = duplicate && !(isPythonLive(duplicate.settings) && !pythonAllowed) ? duplicate.settings : null;
+  const initial = copied ?? (saved && isPythonLive(saved) && !pythonAllowed ? null : saved);
+  // Settings changed before a page reload come back first (the Strategy page's Paper tab only), unless a run is copied.
   const [restored] = useState(() => {
-    const draft = embedded ? readPaperDraft() : null;
+    const draft = embedded && !copied ? readPaperDraft() : null;
     return draft && draft.kind === 'python' && !pythonAllowed ? null : draft;
   });
   /** The restored draft already holds this strategy's settings; do not overwrite it once they load. */
@@ -374,7 +394,8 @@ export function PaperSetupPreview({ source, fromBacktest, fromEditor = fromBackt
   const [capabilities, setCapabilities] = useState<PaperCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState('');
   // Live (real money) is never restored on its own: each Live launch is chosen and confirmed again.
-  const [mode, setMode] = useState<'paper' | 'live'>('paper');
+  // A copied LIVE run opens in LIVE mode, still with the real-money confirmation unticked.
+  const [mode, setMode] = useState<'paper' | 'live'>(copied && duplicate?.live ? 'live' : 'paper');
   const [liveConfirmed, setLiveConfirmed] = useState(false);
   const [liveFields, setLiveFields] = useState(() => ({
     dailyLossLimitPercent: initial?.live?.dailyLossLimitPercent !== undefined ? String(initial.live.dailyLossLimitPercent) : '',
@@ -486,6 +507,22 @@ export function PaperSetupPreview({ source, fromBacktest, fromEditor = fromBackt
     chosenPythonRef.current = isPythonLive(savedStrategy.version.paperSettings) ? savedStrategy.version.paperSettings.strategyRef : '';
     applySettings(savedStrategy.version.paperSettings as LiveSettings);
   }, [savedStrategy?.strategy.id, savedStrategy?.version.version, sourceChoice]);
+
+  // Run Duplicate: the copied run's settings win over the strategy's own saved ones applied just above
+  // (a Pine run's version opens in the editor in the same update, so its effects run first).
+  useEffect(() => {
+    if (!copied || !duplicate) return;
+    awaitingLastRun.current = false;
+    chosenPythonRef.current = isPythonLive(copied) ? copied.strategyRef : '';
+    if (isPineLive(copied)) {
+      setKind('pine');
+      setSourceChoice('editor');
+    }
+    applySettings(copied);
+    setMode(duplicate.live ? 'live' : 'paper');
+    setLiveConfirmed(false);
+    setLaunchError('');
+  }, [duplicate?.key]);
 
   const pythonParams = useMemo(() => Object.fromEntries(Object.entries(pythonInfo?.params ?? {})
     .map(([name, spec]) => [name, parseParam(spec, paramText[name] ?? String(spec.default))])), [pythonInfo, paramText]);
@@ -648,6 +685,11 @@ export function PaperSetupPreview({ source, fromBacktest, fromEditor = fromBackt
           <h1 id="paper-setup-title">Run a strategy in Paper <InfoTooltip label="Paper trading" en={pythonAllowed ? "Your Pine or Python strategy runs on each selected market's own candles and prices from Lighter or Hyperliquid. Its orders execute in real time against live order books with virtual money. Paper does not try to repeat the backtest." : "Your Pine strategy runs on each selected market's own candles and prices from Lighter or Hyperliquid. Its orders execute in real time against live order books with virtual money. Paper does not try to repeat the backtest."} ru={pythonAllowed ? "Pine- или Python-стратегия работает на свечах и ценах каждого выбранного рынка Lighter или Hyperliquid. Её заявки исполняются в реальном времени по живым стаканам на виртуальные деньги. Paper не пытается повторить бэктест." : "Pine-стратегия работает на свечах и ценах каждого выбранного рынка Lighter или Hyperliquid. Её заявки исполняются в реальном времени по живым стаканам на виртуальные деньги. Paper не пытается повторить бэктест."} /></h1>
         </div>
         <button className="paper-text-button" type="button" onClick={onBack}><ArrowLeft size={15} />Back to Backtest</button>
+      </div>}
+
+      {copied && duplicate && <div className="paper-preview-notice paper-duplicate-notice" role="status">
+        <Copy size={18} /><div><strong>Settings copied from run {duplicate.runId.slice(0, 8)} ({duplicate.strategyName}{duplicate.live ? ', LIVE' : ''}).</strong>
+          <span> Check them and press {duplicate.live ? 'Start LIVE; the real-money box needs a tick again' : 'Start Paper'}.</span></div>
       </div>}
 
       {capabilities && !capabilities.available && <div className="paper-preview-notice" role="status">

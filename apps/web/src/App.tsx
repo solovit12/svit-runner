@@ -1,7 +1,8 @@
-import Editor, { type OnMount } from '@monaco-editor/react';
+import type { OnMount } from '@monaco-editor/react';
 import { isRunSetupPath, isRunsPath, newRunsAddress, RUN_SETUP_PATH, RUNS_PATH, runPath } from './lib/run-paths';
 import { AlertTriangle, Play, Settings2, ShieldCheck, Square } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
+import { lazyWithReload } from './lib/lazy-reload';
 import { DEFAULT_SLIPPAGE_PERCENT, PINETS_VERSION, type BacktestRequest, type BacktestResponse, type BacktestTimeframe, type PresetResponse } from '../../../packages/shared/src/contracts';
 import { PYTHON_STRATEGY_SOURCE_PREFIX, pythonStrategyRef, type PaperStrategySettings, type StrategyDetail, type StrategySummary } from '../../../packages/shared/src/strategy-catalog-contracts';
 import { BacktestReports } from './components/BacktestReports';
@@ -10,16 +11,15 @@ import { HyperliquidHistoryPanel } from './components/HyperliquidHistoryPanel';
 import { HyperliquidMarketSelector } from './components/HyperliquidMarketSelector';
 import { Metrics } from './components/Metrics';
 import { LiveAccountsPage } from './components/LiveSettings';
-import { PaperRunsPreview, PaperSetupPreview, type PaperVersionRequest } from './components/PaperScreens';
+import { copyableRunSettings, PaperRunsPreview, PaperSetupPreview, type PaperDuplicate, type PaperVersionRequest } from './components/PaperScreens';
 import { PineCheck } from './components/PineCheck';
 import { ExchangeLimitsChip, useExchangeLoad } from './components/ExchangeLimits';
-import { PriceChart } from './components/PriceChart';
 import { StrategyLibraryBrowser } from './components/StrategyLibraryBrowser';
 import { InfoTooltip } from './components/TranslatedText';
 import { TradesTable } from './components/TradesTable';
 import {
-  createStrategy, deleteStrategy, listPaperExperiments, listStrategies, loadDataSources, loadPreset, loadServerHealth, loadStrategy, loadStrategyCatalogCapabilities,
-  runBacktest, saveStrategyVersion, type ServerHealth,
+  createStrategy, deleteStrategy, listPaperExperiments, listStrategies, loadDataSources, loadPaperExperiment, loadPreset, loadServerHealth, loadStrategy,
+  loadStrategyCatalogCapabilities, loadStrategyVersion, runBacktest, saveStrategyVersion, type ServerHealth,
 } from './lib/api';
 import { HYPERLIQUID_SYMBOL, hyperliquidHistorySource, hyperliquidHistoryWindow, type DataSourcesView } from '../../../packages/shared/src/hyperliquid-history';
 import { backtestDateWindowError, inclusiveUtcDays } from './lib/backtest-date-window';
@@ -31,6 +31,10 @@ import { registerBacktestWebTools } from './lib/webmcp';
 import { EDITION, liveTradingAvailable, reportSharingAvailable } from '../../../packages/shared/src/edition';
 import { findSavedPythonStrategy, pythonStrategySource } from './lib/python-strategy-library';
 import { changedDeclarationProperties, strategyDeclarationProperties, type StrategyDeclarationProperties } from './strategy-declaration';
+
+// The Pine editor (Monaco) and the price chart load with the Strategy page only.
+const PineCodeEditor = lazyWithReload(() => import('./components/PineCodeEditor'));
+const PriceChart = lazyWithReload(() => import('./components/PriceChart').then((module) => ({ default: module.PriceChart })));
 
 type RunState = 'loading-preset' | 'ready' | 'running' | 'success' | 'error' | 'stopped';
 type BacktestExchange = BacktestRequest['exchange'];
@@ -187,6 +191,8 @@ export function App() {
   const [loadedStrategy, setLoadedStrategy] = useState<StrategyDetail | null>(null);
   const [previousEditors, setPreviousEditors] = useState<EditorSnapshot[]>([]);
   const [paperStrategy, setPaperStrategy] = useState<StrategyDetail | null>(null);
+  /** Run Duplicate: the run whose settings the Paper tab shows (cleared when the tab is opened otherwise). */
+  const [paperDuplicate, setPaperDuplicate] = useState<PaperDuplicate | null>(null);
   const [strategyName, setStrategyName] = useState('');
   const [catalogMessage, setCatalogMessage] = useState('');
   const [catalogBusy, setCatalogBusy] = useState(false);
@@ -445,6 +451,36 @@ export function App() {
     if (!fromEditor && !loadedStrategy && preset && source === preset.source && last
       && pythonStrategyRef(last.version.source) === null) loadDetailIntoEditor(last);
     setPaperFromBacktest(fromEditor && backtestMatchesEditor());
+    setPaperDuplicate(null);
+    navigate('paper-setup');
+  };
+
+  /**
+   * Run Duplicate (Runs page): the launch page with every setting of that run. A Pine run's own version
+   * opens in the editor (Undo brings the previous editor back); a Python run leaves the editor as it is.
+   */
+  const duplicateRun = async (runId: string) => {
+    const run = await loadPaperExperiment(runId);
+    const settings = copyableRunSettings(run.settings);
+    if (!settings) throw new Error('This run was started by an older version of the program; its settings cannot be copied.');
+    let version: StrategyDetail | null = null;
+    if (settings.accountModel === 'pine_live_v1') {
+      try {
+        version = await loadStrategyVersion(run.strategyId, run.strategyVersion);
+      } catch {
+        throw new Error(`The Pine code of this run (${run.strategyName}, version ${run.strategyVersion}) is no longer in the strategy library.`);
+      }
+      if (!backtestSettingsSupportedByEditor(version.version.backtestSettings)) {
+        throw new Error('The strategy of this run has backtest settings this editor cannot show.');
+      }
+    }
+    if (version) {
+      rememberEditor();
+      applyStrategyToEditor(version);
+      setCatalogMessage(`Opened ${version.version.name} with the settings of run ${runId.slice(0, 8)}.`);
+    }
+    setPaperFromBacktest(false);
+    setPaperDuplicate({ key: Date.now(), runId, strategyName: run.strategyName, live: Boolean(run.live), settings });
     navigate('paper-setup');
   };
 
@@ -821,7 +857,7 @@ export function App() {
       </div>}
 
       {page === 'paper-runs' ? (
-        <PaperRunsPreview onPrepare={() => preparePaper(false)} />
+        <PaperRunsPreview onPrepare={() => preparePaper(false)} onDuplicate={duplicateRun} />
       ) : page === 'accounts' ? (
         <LiveAccountsPage onOpenRun={openRun} />
       ) : <>
@@ -843,20 +879,9 @@ export function App() {
             </div>
           </div>}
           <div className="editor-wrap">
-            <Editor
-              height="100%"
-              defaultLanguage="plaintext"
-              value={source}
-              onChange={(value) => setSource(value || '')}
-              onMount={(editor) => { editorRef.current = editor; }}
-              theme="vs-dark"
-              loading={<span className="editor-loading">Loading the editor…</span>}
-              options={{
-                minimap: { enabled: false }, fontSize: 16, lineHeight: 24, fontFamily: 'Cascadia Code, Consolas, monospace',
-                scrollBeyondLastLine: false, padding: { top: 14, bottom: 14 }, wordWrap: 'on', automaticLayout: true,
-                renderLineHighlight: 'line', overviewRulerBorder: false, hideCursorInOverviewRuler: true,
-              }}
-            />
+            <Suspense fallback={<span className="editor-loading">Loading the editor…</span>}>
+              <PineCodeEditor value={source} onChange={setSource} onMount={(editor) => { editorRef.current = editor; }} />
+            </Suspense>
           </div>
           <PineCheck source={source} symbol={symbol} timeframe={timeframe} onGoToLine={(line) => {
             const editor = editorRef.current;
@@ -874,7 +899,7 @@ export function App() {
           }} />
           <div className="editor-footer"><span>UTF-8</span><span>Spaces: 4</span><span>UTC</span></div>
         </div>
-        <PriceChart result={result} loading={state === 'running'} />
+        <Suspense fallback={<div className="chart-shell" />}><PriceChart result={result} loading={state === 'running'} /></Suspense>
       </section>
 
       <div className="strategy-tabs" role="tablist" aria-label="Strategy mode">
@@ -883,7 +908,7 @@ export function App() {
       </div>
 
       {paperTabMounted && <div role="tabpanel" id="panel-paper" aria-labelledby="tab-paper" hidden={page !== 'paper-setup'}>
-        <PaperSetupPreview embedded source={source} fromBacktest={paperFromBacktest} fromEditor strategies={strategies} savedStrategy={loadedStrategy} catalogBusy={catalogBusy} onSelectStrategy={() => undefined} backtestTimeframe={timeframe} backtestSymbol={symbol} onPrepareVersion={preparePaperVersion} onBack={() => navigate('backtest')} onRuns={() => navigate('paper-runs')} onAccounts={() => navigate('accounts')} />
+        <PaperSetupPreview embedded source={source} fromBacktest={paperFromBacktest} fromEditor strategies={strategies} savedStrategy={loadedStrategy} catalogBusy={catalogBusy} onSelectStrategy={() => undefined} backtestTimeframe={timeframe} backtestSymbol={symbol} onPrepareVersion={preparePaperVersion} onBack={() => navigate('backtest')} onRuns={() => navigate('paper-runs')} onAccounts={() => navigate('accounts')} duplicate={paperDuplicate} />
       </div>}
 
       <div role="tabpanel" id="panel-backtest" aria-labelledby="tab-backtest" hidden={page !== 'backtest'}>

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
-  StartPaperExperimentSchema, type PaperExperimentDetail, type PaperExperimentSummary, type VenuePnl,
+  StartPaperExperimentSchema, type PaperExperimentDetail, type PaperExperimentSummary, type PaperRunTradeStats, type VenuePnl,
 } from '../../../packages/shared/src/paper-experiment-contracts.js';
 import { venueTotalPnl } from '../../../packages/shared/src/paper-pnl.js';
 import type { StrategyCatalogV1 } from './strategy-catalog.js';
@@ -11,8 +11,11 @@ import {
 } from './paper-execution/paper-experiment-controller.js';
 import { listPythonStrategies } from './paper-execution/pine-paper-factory.js';
 import { fetchVenueCatalog, type PaperVenueKey, type VenueMarket } from './paper-execution/venue-markets.js';
-import { PaperExperimentActivityQueryError, readPaperExperimentActivityV1, readPaperExperimentTradesV1 } from './paper-execution/paper-experiment-activity.js';
+import {
+  PaperExperimentActivityQueryError, readPaperExperimentActivityV1, readPaperExperimentTradeStatsV1, readPaperExperimentTradesV1,
+} from './paper-execution/paper-experiment-activity.js';
 import { forgetNautilusPaperRun, readNautilusPaperLedgerSnapshot, readNautilusPaperSnapshot } from './paper-execution/nautilus-paper-ledger.js';
+import { NautilusOutboxChecks } from './paper-execution/outbox-check.js';
 
 export function isCrossOriginPaperWrite(request: FastifyRequest): boolean {
   if (request.headers['sec-fetch-site'] === 'cross-site') return true;
@@ -37,6 +40,8 @@ export interface PaperRouteDependencies {
   readonly getStrategyCatalog: () => StrategyCatalogV1 | null;
   /** False in the Pine-only public edition. */
   readonly pythonStrategies: boolean;
+  /** Long journal checks of ended runs (tests pass their own). */
+  readonly outboxChecks?: NautilusOutboxChecks;
 }
 
 /** Paper control and inspection routes, served by the process that owns the runs. */
@@ -45,6 +50,23 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
     paperExperiments, paperRuntimeFactory, paperRunsDir, strategyPacks, nautilusPython, projectRoot, getStrategyCatalog,
     pythonStrategies,
   } = dependencies;
+  const outboxChecks = dependencies.outboxChecks ?? new NautilusOutboxChecks({
+    log: (message, error) => app.log.warn({ err: error }, message),
+  });
+  /** An ended run's folder, when it has a journal; null otherwise. */
+  const journalDir = (id: string): string | null => {
+    if (!paperRunsDir) return null;
+    const directory = path.join(paperRunsDir, id);
+    return existsSync(path.join(directory, 'nautilus.sqlite')) ? directory : null;
+  };
+  /**
+   * Waits (without blocking the engine) until an ended run's journal is checked against its
+   * child outbox; false when the check failed and the journal should not be read now.
+   */
+  const journalReady = async (experiment: PaperExperimentDetail): Promise<boolean> => {
+    const directory = experiment.endedAt ? journalDir(experiment.id) : null;
+    return directory ? outboxChecks.ready(experiment, directory) : true;
+  };
   let pythonStrategyCache: { at: number; value: Awaited<ReturnType<typeof listPythonStrategies>> } | null = null;
   app.get('/api/python-strategies', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
@@ -126,11 +148,39 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
     return pnl.length ? pnl : undefined;
   };
 
+  // Closed positions: an ended run's count no longer changes either (its page may still recover
+  // fills from the outbox, and then forgets this so the list reads the journal again).
+  const endedStats = new Map<string, PaperRunTradeStats | null>();
+  const statsOf = (summary: PaperExperimentSummary): PaperRunTradeStats | null => {
+    const key = endedKey(summary);
+    if (summary.endedAt && endedStats.has(key)) return endedStats.get(key)!;
+    const detail = paperExperiments.get(summary.id);
+    const stats = detail ? readPaperExperimentTradeStatsV1({ detail, runtimeDirectory: paperRunsDir }) : null;
+    if (summary.endedAt) endedStats.set(key, stats);
+    return stats;
+  };
+
+  // Ended runs get their journal checked in the background once, so their pages open at once.
+  const prepared = new Set<string>();
+  const prepare = (summary: PaperExperimentSummary): void => {
+    const key = endedKey(summary);
+    if (!summary.endedAt || prepared.has(key)) return;
+    prepared.add(key);
+    const detail = paperExperiments.get(summary.id);
+    const directory = journalDir(summary.id);
+    if (!detail || !directory) return;
+    void outboxChecks.ready(detail, directory).then((ok) => {
+      if (ok) { endedPnl.delete(key); endedStats.delete(key); }   // read the checked journal again
+    });
+  };
+
   app.get('/api/paper-experiments', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
     return { experiments: paperExperiments.list().map((summary) => {
+      prepare(summary);
       const pnl = pnlOf(summary);
-      return pnl?.length ? { ...summary, pnl } : summary;
+      const trades = statsOf(summary);
+      return { ...summary, ...(pnl?.length ? { pnl } : {}), ...(trades ? { trades } : {}) };
     }) };
   });
 
@@ -140,6 +190,7 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
     if (experiment && !experiment.runtime && paperRunsDir) {
       const directory = path.join(paperRunsDir, experiment.id);
       if (existsSync(path.join(directory, 'nautilus.sqlite'))) {
+        if (!(await journalReady(experiment))) return { experiment };
         try {
           const runtime = readNautilusPaperSnapshot(experiment, directory);
           const detail = runtime ? { ...experiment, runtime } : experiment;
@@ -167,8 +218,9 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
       if (rawLimit !== undefined && !/^[1-9][0-9]{0,2}$/.test(rawLimit)) {
         return reply.code(400).send({ kind: 'INVALID_PAPER_ACTIVITY_QUERY', error: 'Invalid fill page size.' });
       }
+      const ready = await journalReady(experiment);
       try {
-        return { activity: readPaperExperimentActivityV1({ detail: experiment, runtimeDirectory: paperRunsDir,
+        return { activity: readPaperExperimentActivityV1({ detail: experiment, runtimeDirectory: ready ? paperRunsDir : null,
           limit: rawLimit === undefined ? 20 : Number(rawLimit), fillsCursor: request.query.fillsCursor }) };
       } catch (error) {
         if (error instanceof PaperExperimentActivityQueryError) {
@@ -183,7 +235,11 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
     reply.header('Cache-Control', 'no-store');
     const experiment = paperExperiments.get(request.params.id);
     if (!experiment) return reply.code(404).send({ kind: 'PAPER_EXPERIMENT_NOT_FOUND', error: 'Paper experiment not found.' });
-    return { trades: readPaperExperimentTradesV1({ detail: experiment, runtimeDirectory: paperRunsDir }) };
+    const ready = await journalReady(experiment);
+    const trades = readPaperExperimentTradesV1({ detail: experiment, runtimeDirectory: ready ? paperRunsDir : null });
+    // Reading an ended run here recovers its outbox: let the list count its positions again.
+    if (experiment.endedAt) endedStats.delete(endedKey(experiment));
+    return { trades };
   });
 
   app.post('/api/paper-experiments', async (request, reply) => {
@@ -230,6 +286,8 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
     }
     if (experiment) {
       endedPnl.delete(endedKey(experiment));
+      endedStats.delete(endedKey(experiment));
+      outboxChecks.forget(experiment.id);
       if (paperRunsDir) forgetNautilusPaperRun(experiment.id, path.join(paperRunsDir, experiment.id));
     }
     return { deleted: request.params.id };

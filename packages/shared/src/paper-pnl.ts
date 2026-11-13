@@ -14,12 +14,13 @@ export function venueTotalPnl(detail: Pick<PaperExperimentDetail, 'accounts' | '
     .filter((account) => !live || detail.tracks.some((track) => track.venue === account.venue))
     .map((account) => {
       const observed = runtime.accounts.find((entry) => entry.venue === account.venue && entry.accountId === account.accountId);
-      if (!observed) return { venue: account.venue, total: null, percent: null };
+      if (!observed) return { venue: account.venue, total: null, percent: null, balance: null };
       const unrealized = observed.positions.reduce((sum, position) => sum + Number(position.unrealizedPnl ?? 0), 0);
       const equity = Number(observed.cashBalance) + unrealized;
+      const balance = Number.isFinite(equity) ? equity : null;
       const start = live ? (observed.startBalance === undefined ? null : Number(observed.startBalance)) : account.startingCash;
-      if (start === null || !Number.isFinite(equity)) return { venue: account.venue, total: null, percent: null };
-      const total = equity - start;
-      return { venue: account.venue, total, percent: start ? total / start * 100 : null };
+      if (start === null || balance === null) return { venue: account.venue, total: null, percent: null, balance };
+      const total = balance - start;
+      return { venue: account.venue, total, percent: start ? total / start * 100 : null, balance };
     });
 }

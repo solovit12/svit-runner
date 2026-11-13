@@ -136,6 +136,11 @@ export async function loadStrategy(id: string): Promise<StrategyDetail> {
   return parse<StrategyDetail>(await apiFetch(`/api/strategies/${encodeURIComponent(id)}`));
 }
 
+/** One saved version of a strategy (the version a run was started with, for Run Duplicate). */
+export async function loadStrategyVersion(id: string, version: number): Promise<StrategyDetail> {
+  return parse<StrategyDetail>(await apiFetch(`/api/strategies/${encodeURIComponent(id)}/versions/${version}`));
+}
+
 export async function createStrategy(input: CreateStrategyInput): Promise<StrategyDetail> {
   return parse<StrategyDetail>(await apiFetch('/api/strategies', {
     method: 'POST',

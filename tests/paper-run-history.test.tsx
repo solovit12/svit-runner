@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PaperPositionsTable, PaperRunActivity, PaperRunDataGaps, PaperRunHealth, PaperRunRules, PaperRunHistory, PaperRunTrackTable, PaperRuns, StopRunDialog, DeleteRunDialog } from '../apps/web/src/components/PaperRuns';
+import { PaperPositionsTable, PaperRunActivity, PaperRunDataGaps, PaperRunHealth, PaperRunRules, PaperRunHistory, PaperRunTrackTable, PaperRuns, StopRunDialog, DeleteRunDialog, runListOrder } from '../apps/web/src/components/PaperRuns';
 import type { PaperExperimentActivity, PaperExperimentSummary, PaperExperimentDetail } from '../packages/shared/src/paper-experiment-contracts';
 
 const sample: PaperExperimentSummary = {
@@ -84,14 +84,14 @@ describe('Paper run history', () => {
     expect(html).toContain('Hyperliquid, Lighter');
     expect(html).toContain('HYPE');
     expect(html).toContain('1h');
-    expect(html).toContain('5,000 USDC');
+    expect(html).toContain('<div><span>Hyperliquid</span> 5,000.00 USDC</div><div><span>Lighter</span> 5,000.00 USDC</div>');
     expect(html).toContain('1h 15m');
     expect(html).toContain('Stop needs attention');
     expect(html).not.toContain('Same-millisecond market event');
     expect(html).not.toContain('Paper runtime stop failed');
   });
 
-  it('shows the strategy parameters right after Total PnL and a Stop button for active runs only', () => {
+  it('shows the results, then the strategy parameters, and a Stop button for active runs only', () => {
     const params = { pairs: 'BRENTOIL/WTI, XAU/XAG', ema_minutes: 30, windows: 'cme_closed' };
     const html = renderToStaticMarkup(createElement(PaperRunHistory, {
       experiments: [{ ...sample, id: 'run-a', status: 'running', reason: null, endedAt: null, params },
@@ -99,14 +99,78 @@ describe('Paper run history', () => {
       onOpen: () => undefined, onStop: () => undefined,
     }));
     const headers = [...html.matchAll(/<th>([A-Za-z /]+)/g)].map((match) => match[1]!.trim());
-    expect(headers.slice(0, 5)).toEqual(['Strategy', 'Status', 'Total PnL', 'Strategy parameters', 'Venues']);
+    expect(headers.slice(0, 8)).toEqual(['Strategy', 'Status', 'Total PnL', 'Closed positions', 'Win rate', 'Profit factor',
+      'Strategy parameters', 'Venues']);
     expect(headers.at(-1)).toBe('Actions');
     expect(html).toContain('<span>pairs = BRENTOIL/WTI, XAU/XAG</span><span>ema_minutes = 30</span><span>windows = cme_closed</span>');
     const [first, second] = html.split('<tbody>')[1]!.split('</tr>');
     expect(first).toContain('aria-label="Stop run run-a of Range Levels"');
     expect(first).toContain('>Stop</button>');
     expect(second).not.toContain('<button');
-    expect(second).toContain('<td>—</td>');
+    expect(second).toContain('<td class="paper-history-params-cell">—</td>');
+  });
+
+  it('lists running LIVE runs first, then running Paper runs (newest start first), then the rest as the server lists them', () => {
+    const run = (id: string, status: PaperExperimentSummary['status'], startedAt: string, live = false): PaperExperimentSummary =>
+      ({ ...sample, id, status, startedAt, live, endedAt: status === 'interrupted' ? '2026-11-13T09:00:00.000Z' : null });
+    const server = [   // newest launch first, as the server sends them
+      run('paper-new', 'running', '2026-11-13T08:00:00.000Z'),
+      run('done-live', 'interrupted', '2026-11-13T07:00:00.000Z', true),
+      run('live-old', 'running', '2026-11-12T06:00:00.000Z', true),
+      run('done-paper', 'interrupted', '2026-11-12T05:00:00.000Z'),
+      run('live-new', 'warming_up', '2026-11-13T04:00:00.000Z', true),
+      run('paper-old', 'stopping', '2026-11-11T03:00:00.000Z'),
+    ];
+    expect(runListOrder(server).map((item) => item.id))
+      .toEqual(['live-new', 'live-old', 'paper-new', 'paper-old', 'done-live', 'done-paper']);
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, { experiments: server, onOpen: () => undefined }));
+    const rows = html.split('<tbody>')[1]!.split('</tr>');
+    expect(rows[0]).toContain('class="paper-history-row paper-history-row-live"');
+    expect(rows[0]).toContain('aria-label="Open LIVE run of Range Levels"');
+    expect(rows[2]).toContain('class="paper-history-row"');
+    expect(rows[4]).toContain('class="paper-history-row paper-history-row-live-ended"');   // a finished LIVE run: amber
+  });
+
+  it('shows closed positions, win rate and profit factor of each run', () => {
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, {
+      experiments: [
+        { ...sample, id: 'mixed', trades: { closed: 8, wins: 5, grossProfit: 12.5, grossLoss: 5, partial: false } },
+        { ...sample, id: 'no-loss', trades: { closed: 2, wins: 2, grossProfit: 3, grossLoss: 0, partial: false } },
+        { ...sample, id: 'long', trades: { closed: 4, wins: 1, grossProfit: 1, grossLoss: 4, partial: true } },
+        { ...sample, id: 'none', trades: { closed: 0, wins: 0, grossProfit: 0, grossLoss: 0, partial: false } },
+        { ...sample, id: 'no-journal' }],
+      onOpen: () => undefined,
+    }));
+    const cells = (row: string) => [...row.matchAll(/<td class="paper-history-number"><span[^>]*>([^<]*)<\/span><\/td>/g)].map((match) => match[1]);
+    const rows = html.split('<tbody>')[1]!.split('</tr>');
+    expect(cells(rows[0]!)).toEqual(['8', '62.5%', '2.50']);
+    expect(cells(rows[1]!)).toEqual(['2', '100.0%', '∞']);
+    expect(cells(rows[2]!)).toEqual(['≈4', '≈25.0%', '≈0.25']);
+    expect(rows[2]).toContain('title="The oldest fills of a very long run');
+    expect(cells(rows[3]!)).toEqual(['0', '—', '—']);
+    expect(cells(rows[4]!)).toEqual(['—', '—', '—']);
+  });
+
+  it('collapses the columns chosen in this browser, never Actions, and offers to show them all again', () => {
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify(['pnl', 'params', 'unknown']), setItem: () => undefined });
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, {
+      experiments: [{ ...sample, params: { pairs: 'BRENTOIL/WTI' },
+        pnl: [{ venue: 'Lighter', total: 12.34, percent: 1.2 }] }],
+      onOpen: () => undefined, onDuplicate: () => undefined,
+    }));
+    expect(html).toContain('aria-label="Show column Total PnL"');
+    expect(html).toContain('aria-label="Show column Strategy parameters"');
+    expect(html).toContain('aria-label="Hide column Status"');
+    expect(html).not.toContain('Hide column Actions');
+    expect(html).not.toContain('+12.34');
+    expect(html).not.toContain('pairs = BRENTOIL/WTI');
+    expect(html).toContain('Show all columns (2 hidden)');
+    expect(html.match(/<td class="paper-col-collapsed" aria-hidden="true"><\/td>/g)).toHaveLength(2);
+    expect(html).toContain('>Run Duplicate</button>');
+    vi.unstubAllGlobals();
+    const open = renderToStaticMarkup(createElement(PaperRunHistory, { experiments: [sample], onOpen: () => undefined }));
+    expect(open).not.toContain('paper-col-collapsed');
+    expect(open).not.toContain('Show all columns');
   });
 
   it('asks "are you sure" before a stop and says what a LIVE stop does', () => {
@@ -121,6 +185,19 @@ describe('Paper run history', () => {
     expect(live).toContain('Stop this LIVE run?');
     expect(live).toContain('closed at market on Lighter and Hyperliquid');
     expect(live).toContain('Stopping…');
+  });
+
+  it('offers Run Duplicate for active and finished runs alike', () => {
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, {
+      experiments: [{ ...sample, id: 'done', status: 'interrupted' }, { ...sample, id: 'going', status: 'running', endedAt: null }],
+      onOpen: () => undefined, onStop: () => undefined, onDelete: () => undefined, onDuplicate: () => undefined, duplicateBusyId: 'going',
+    }));
+    expect(html).toContain('aria-label="Run a duplicate of run done of Range Levels"');
+    expect(html).toContain('aria-label="Run a duplicate of run going of Range Levels"');
+    expect(html).toContain('>Run Duplicate</button>');
+    expect(html).toContain('>Opening…</button>');
+    const none = renderToStaticMarkup(createElement(PaperRunHistory, { experiments: [sample], onOpen: () => undefined }));
+    expect(none).not.toContain('Run Duplicate');
   });
 
   it('offers Delete only for finished runs and asks "are you sure" first', () => {

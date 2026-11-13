@@ -6,8 +6,11 @@ import {
   type PaperExperimentActivityEvent,
   type PaperExperimentDetail,
   type PaperExperimentTrades,
+  type PaperRunTradeStats,
 } from '../../../../packages/shared/src/paper-experiment-contracts.js';
-import { NautilusPaperLedgerQueryError, readNautilusPaperActivity, readNautilusPaperTrades } from './nautilus-paper-ledger.js';
+import {
+  NautilusPaperLedgerQueryError, readNautilusPaperActivity, readNautilusPaperTradeStats, readNautilusPaperTrades,
+} from './nautilus-paper-ledger.js';
 
 const MAX_PAGE_SIZE = 100;
 
@@ -62,6 +65,22 @@ export function readPaperExperimentActivityV1(input: {
   } catch (error) {
     if (error instanceof NautilusPaperLedgerQueryError) throw new PaperExperimentActivityQueryError(error.message);
     return controlOnly(detail, 'partial');
+  }
+}
+
+/** Closed positions of a run for the runs list; null without a readable fill journal (nothing invented). */
+export function readPaperExperimentTradeStatsV1(input: {
+  readonly detail: PaperExperimentDetail;
+  readonly runtimeDirectory: string | null;
+}): PaperRunTradeStats | null {
+  if (!input.runtimeDirectory) return null;
+  const directory = path.join(path.resolve(input.runtimeDirectory), input.detail.id);
+  if (!existsSync(directory) || !lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink()) return null;
+  if (!existsSync(path.join(directory, 'nautilus.sqlite'))) return null;
+  try {
+    return readNautilusPaperTradeStats(input.detail, directory);
+  } catch {
+    return null;
   }
 }
 

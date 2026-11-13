@@ -200,10 +200,6 @@ export function liveStopReason(failure: string | null, engineStopReason: string 
   return base.includes(outcome) ? base : `${base} ${outcome}`;
 }
 
-export function isPineLiveSettings(settings: Proposed['settings']): settings is Proposed['settings'] & PineLivePaperSettingsV1 {
-  return settings.accountModel === 'pine_live_v1';
-}
-
 export function isLiveSettings(settings: Proposed['settings']): settings is Proposed['settings'] & LiveSettings {
   return settings.accountModel === 'pine_live_v1' || settings.accountModel === 'python_live_v1';
 }

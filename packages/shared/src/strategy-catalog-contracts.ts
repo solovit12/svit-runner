@@ -151,8 +151,6 @@ export const LiveTradingSettingsSchema = z.object({
   }).strict().optional(),
 }).strict();
 
-export type LiveTradingSettings = z.infer<typeof LiveTradingSettingsSchema>;
-
 /**
  * Generic Pine Paper: the saved Pine strategy runs on the venue's own closed
  * candles and its orders execute in real time against live order books.
@@ -229,8 +227,6 @@ export const PaperStrategySettingsSchema = z.union([
 ]);
 
 export type PaperStrategySettings = z.infer<typeof PaperStrategySettingsSchema>;
-export type VenueSharedPaperStrategySettings = z.infer<typeof VenueSharedPaperStrategySettingsSchema>;
-export type VenueSharedPaperStrategySettingsV2 = z.infer<typeof VenueSharedPaperStrategySettingsV2Schema>;
 export type PineLivePaperSettingsV1 = z.infer<typeof PineLivePaperSettingsV1Schema>;
 export type PythonLivePaperSettingsV1 = z.infer<typeof PythonLivePaperSettingsV1Schema>;
 export type StrategyBacktestSettings = Omit<BacktestRequest, 'source'>;

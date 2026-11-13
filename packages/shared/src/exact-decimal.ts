@@ -169,28 +169,3 @@ export function divideExactDecimalsToScale(
 
   return createExactDecimal(negative ? -quotient : quotient, outputScale);
 }
-
-export function minExactDecimal(left: ExactDecimal, right: ExactDecimal): ExactDecimal {
-  const checkedLeft = checkedDecimal(left, 'left');
-  const checkedRight = checkedDecimal(right, 'right');
-  return compareExactDecimals(checkedLeft, checkedRight) <= 0 ? checkedLeft : checkedRight;
-}
-
-export function isExactMultipleOfStep(value: ExactDecimal, step: ExactDecimal): boolean {
-  const checkedValue = checkedDecimal(value, 'value');
-  const checkedStep = checkedDecimal(step, 'step');
-  if (checkedStep.coefficient <= 0n) throw new RangeError('step must be greater than zero.');
-
-  const scale = Math.max(checkedValue.scale, checkedStep.scale);
-  const valueCoefficient = alignedCoefficient(checkedValue, scale);
-  const stepCoefficient = alignedCoefficient(checkedStep, scale);
-  return valueCoefficient % stepCoefficient === 0n;
-}
-
-export function assertExactMultipleOfStep(value: ExactDecimal, step: ExactDecimal): void {
-  if (!isExactMultipleOfStep(value, step)) {
-    throw new RangeError(
-      `${formatExactDecimal(value)} is not an exact multiple of step ${formatExactDecimal(step)}.`,
-    );
-  }
-}

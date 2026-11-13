@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowLeft, ArrowRight, Clock3, ShieldCheck } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   deletePaperExperiment, listPaperExperiments, loadLiveAccounts, loadPaperCapabilities, loadPaperExperiment, loadPaperExperimentActivity,
   loadPaperExperimentTrades, stopPaperExperiment,
@@ -7,12 +7,13 @@ import {
   type PaperExperimentSummary, type PaperExperimentTrades,
 } from '../lib/api';
 import { PaperStrategyPanels, PaperTradeGroups } from './PaperRunTrades';
+import { formatDate, pnlClass } from '../lib/format';
 import { runIdFromPath, runPath } from '../lib/run-paths';
 import { NativeRunNotice } from './NativeRunNotice';
 import { InfoTooltip } from './TranslatedText';
 import { XyzHoursNotice } from './XyzHoursNotice';
 import { isXyzMarket } from '../lib/stock-hours';
-import type { PaperExperimentRuntimeView } from '../../../../packages/shared/src/paper-experiment-contracts';
+import type { PaperExperimentRuntimeView, PaperRunTradeStats } from '../../../../packages/shared/src/paper-experiment-contracts';
 
 const statusLabel: Record<PaperExperimentStatus, string> = {
   preparing: 'Preparing',
@@ -31,10 +32,6 @@ const EVENTS_COLLAPSED = 5;
 function signedNumber(value: number, digits = 2): string {
   const text = Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
   return `${value > 0 ? '+' : value < 0 ? '−' : ''}${text}`;
-}
-
-function pnlClass(value: number): string {
-  return value > 0 ? 'paper-pnl-up' : value < 0 ? 'paper-pnl-down' : '';
 }
 
 function percent(value: unknown): string {
@@ -78,6 +75,19 @@ function stopTargetOf(run: PaperExperimentSummary): StopTarget {
 
 function canStopRun(status: PaperExperimentStatus): boolean {
   return !['completed', 'interrupted'].includes(status);
+}
+
+/**
+ * Order of the runs list: running LIVE runs first, then running Paper runs, each newest start
+ * first; then the finished runs in the server's order (newest launch first). Finished LIVE runs
+ * stay among the finished ones (more than 20 on the server); their red tint marks them.
+ */
+export function runListOrder(runs: readonly PaperExperimentSummary[]): PaperExperimentSummary[] {
+  const group = (run: PaperExperimentSummary) => canStopRun(run.status) ? (run.live ? 0 : 1) : 2;
+  const started = (run: PaperExperimentSummary) => Date.parse(run.startedAt ?? run.createdAt) || 0;
+  return runs.map((run, index) => ({ run, index })).sort((left, right) => group(left.run) - group(right.run)
+    || (group(left.run) < 2 ? started(right.run) - started(left.run) : 0)
+    || left.index - right.index).map(({ run }) => run);
 }
 
 /** "Are you sure?" before a run is stopped, from the runs list or a run page. */
@@ -308,10 +318,6 @@ export function PaperRunEngineLabel({ engine, live = false, exchanges = 'Lighter
   return <div><span>Paper engine <InfoTooltip label="Paper execution engine" en="Nautilus Sandbox simulates orders and keeps the virtual account for this run. It does not place real exchange orders. The saved Pine code remains a historical backtest reference; funding is excluded." ru="Nautilus Sandbox моделирует заявки и ведёт виртуальный счёт этого прогона. Реальные заявки на биржу не отправляются. Сохранённый Pine-код остаётся историческим ориентиром бэктеста; funding не учитывается." /></span><strong>Nautilus Sandbox</strong></div>;
 }
 
-function formatDate(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—';
-}
-
 function formatDuration(item: PaperExperimentSummary): string {
   if (!item.startedAt || (!item.endedAt && ['completed', 'interrupted'].includes(item.status))) return '—';
   const elapsed = Math.max(0, Date.parse(item.endedAt ?? new Date().toISOString()) - Date.parse(item.startedAt));
@@ -349,7 +355,106 @@ function paramsCell(params: PaperExperimentSummary['params']) {
   return <span className="paper-history-params">{entries.map(([name, value]) => <span key={name}>{name} = {String(value)}</span>)}</span>;
 }
 
-export function PaperRunHistory({ experiments, onOpen, onStop, stopBusyId = null, onDelete, deleteBusyId = null }: {
+/** One column of the runs list; Actions is not one of them (it never collapses). */
+interface HistoryColumn {
+  readonly key: string;
+  readonly title: string;
+  readonly tip?: ReactNode;
+  readonly className?: string;
+  readonly cell: (item: PaperExperimentSummary) => ReactNode;
+}
+
+/** Collapsed columns of the runs list, remembered in this browser only (a screen recording hides them). */
+export const COLLAPSED_COLUMNS_KEY = 'psr.runs.collapsedColumns.v1';
+
+function readCollapsedColumns(): string[] {
+  try {
+    const value: unknown = JSON.parse(globalThis.localStorage?.getItem(COLLAPSED_COLUMNS_KEY) ?? '[]');
+    return Array.isArray(value) ? value.filter((key): key is string => typeof key === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCollapsedColumns(keys: readonly string[]): void {
+  try { globalThis.localStorage?.setItem(COLLAPSED_COLUMNS_KEY, JSON.stringify(keys)); } catch { /* a convenience only */ }
+}
+
+/** "≈" when the oldest fills of a very long run were left out or a position has no realized PnL. */
+function approx(stats: PaperRunTradeStats): string {
+  return stats.partial ? '≈' : '';
+}
+
+export function closedPositionsText(stats: PaperRunTradeStats | undefined): string {
+  return stats ? `${approx(stats)}${stats.closed}` : '—';
+}
+
+export function winRateText(stats: PaperRunTradeStats | undefined): string {
+  if (!stats || stats.closed === 0) return '—';
+  return `${approx(stats)}${(stats.wins / stats.closed * 100).toFixed(1)}%`;
+}
+
+export function profitFactorText(stats: PaperRunTradeStats | undefined): string {
+  if (!stats || stats.closed === 0) return '—';
+  if (stats.grossLoss <= 0) return stats.grossProfit > 0 ? '∞' : '—';
+  return `${approx(stats)}${(stats.grossProfit / stats.grossLoss).toFixed(2)}`;
+}
+
+/** Each exchange's account now (balance plus open positions); a Paper run with no snapshot yet still has its start. */
+function balanceCell(item: PaperExperimentSummary): ReactNode {
+  const usdc = (value: number) => `${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`;
+  const rows = (item.pnl ?? []).filter((row) => row.balance !== undefined);
+  if (rows.length) {
+    return rows.map((row) => <div key={row.venue}><span>{row.venue}</span> {row.balance === null || row.balance === undefined ? '—' : usdc(row.balance)}</div>);
+  }
+  if (item.live) return '—';
+  if (item.capitalPerVenue == null) return '—';
+  const venues = item.venues ?? [];
+  return venues.length > 1
+    ? venues.map((venue) => <div key={venue}><span>{venue}</span> {usdc(item.capitalPerVenue!)}</div>)
+    : usdc(item.capitalPerVenue);
+}
+
+const PARTIAL_TITLE = 'The oldest fills of a very long run, or a position without realized PnL, are left out';
+
+const HISTORY_COLUMNS: readonly HistoryColumn[] = [
+  { key: 'strategy', title: 'Strategy', className: 'paper-history-strategy',
+    cell: (item) => <><strong>{item.strategyName}</strong>{item.live && <> <span className="paper-live-badge">LIVE</span></>}</> },
+  { key: 'status', title: 'Status', cell: (item) => <strong>{visibleStatus(item)}</strong> },
+  { key: 'pnl', title: 'Total PnL', className: 'paper-history-pnl',
+    tip: <InfoTooltip label="total PnL" en="Each exchange's account equity (balance plus open positions) against its start: the virtual starting balance in Paper, the real balance at the start in LIVE. From the last account snapshot; fees included, funding not." ru="Капитал счёта каждой биржи (баланс плюс открытые позиции) против старта: виртуального стартового баланса в Paper, настоящего баланса на старте в LIVE. По последнему снимку счёта; комиссии учтены, funding — нет." />,
+    cell: (item) => item.pnl?.length
+      ? item.pnl.map((row) => <div key={row.venue}><span>{row.venue}</span> {row.total === null ? '—'
+        : <b className={pnlClass(row.total)}>{signedNumber(row.total)}{row.percent === null ? '' : ` (${signedNumber(row.percent)}%)`}</b>}</div>)
+      : '—' },
+  { key: 'closed', title: 'Closed positions', className: 'paper-history-number',
+    tip: <InfoTooltip label="closed positions" en="Positions the run has closed, on all its exchanges: one market from its entry until it is flat again. A pair strategy (a pairs parameter or a pair tracker on the run page) counts both legs of a pair opened together as one position, as in Trades by position; every other strategy counts each position on its own." ru="Закрытые позиции прогона на всех его биржах: одна монета от входа до полного выхода. У парной стратегии (есть параметр pairs или трекер пары на странице прогона) обе ноги пары, открытые вместе, — одна позиция, как в «Trades by position»; у остальных стратегий каждая позиция считается отдельно." />,
+    cell: (item) => <span title={item.trades?.partial ? PARTIAL_TITLE : undefined}>{closedPositionsText(item.trades)}</span> },
+  { key: 'winRate', title: 'Win rate', className: 'paper-history-number',
+    tip: <InfoTooltip label="win rate" en="Share of the closed positions whose realized PnL (fees included) is above zero. In a pair strategy a pair is one position: it wins when both legs together earned." ru="Доля закрытых позиций, у которых реализованный PnL (с комиссиями) больше нуля. У парной стратегии пара — одна позиция: она в плюсе, если обе ноги вместе заработали." />,
+    cell: (item) => <span title={item.trades?.partial ? PARTIAL_TITLE : undefined}>{winRateText(item.trades)}</span> },
+  { key: 'profitFactor', title: 'Profit factor', className: 'paper-history-number',
+    tip: <InfoTooltip label="profit factor" en="Profit of the winning positions divided by the loss of the losing ones (realized, fees included). Above 1: the run earned more than it lost. ∞: no losing position yet. A pair counts as one position, as in Closed positions." ru="Прибыль прибыльных позиций, делённая на убыток убыточных (реализованные, с комиссиями). Больше 1 — прогон заработал больше, чем потерял. ∞ — убыточных позиций ещё нет. Пара — одна позиция, как в Closed positions." />,
+    cell: (item) => <span title={item.trades?.partial ? PARTIAL_TITLE : undefined}>{profitFactorText(item.trades)}</span> },
+  { key: 'params', title: 'Strategy parameters', className: 'paper-history-params-cell',
+    tip: <InfoTooltip label="strategy parameters" en="The parameters a Python strategy was started with; runs of one strategy differ only here. Pine runs have none." ru="Параметры, с которыми запущена Python-стратегия; прогоны одной стратегии отличаются только здесь. У Pine-прогонов их нет." />,
+    cell: (item) => paramsCell(item.params) },
+  { key: 'venues', title: 'Venues', className: 'paper-history-venues', cell: (item) => item.venues?.join(', ') || '—' },
+  { key: 'markets', title: 'Markets', cell: (item) => marketNames(item.markets) },
+  { key: 'timeframe', title: 'Timeframe', cell: (item) => item.timeframe ?? '—' },
+  { key: 'tracks', title: 'Tracks', cell: (item) => item.trackCount },
+  { key: 'capital', title: 'Balance', className: 'paper-history-pnl',
+    tip: <InfoTooltip label="balance per exchange" en="Each exchange's account now: balance plus open positions, from the last account snapshot (at the stop for a finished run). The real account in LIVE, the virtual one in Paper." ru="Счёт каждой биржи сейчас: баланс плюс открытые позиции, по последнему снимку счёта (у остановленного прогона — на момент остановки). В LIVE — настоящий счёт, в Paper — виртуальный." />,
+    cell: balanceCell },
+  { key: 'started', title: 'Started', cell: (item) => formatDate(item.startedAt) },
+  { key: 'duration', title: 'Duration',
+    tip: <InfoTooltip label="paper run duration" en="Elapsed time from the start until the end of the run. For an active run this grows while the page refreshes. A run that never started has no duration." ru="Время от начала до окончания сеанса. У активного сеанса оно увеличивается при обновлении страницы. Если сеанс не начался, длительности нет." />,
+    cell: (item) => formatDuration(item) },
+  { key: 'ended', title: 'Ended', cell: (item) => formatDate(item.endedAt) },
+];
+
+export function PaperRunHistory({ experiments, onOpen, onStop, stopBusyId = null, onDelete, deleteBusyId = null,
+  onDuplicate, duplicateBusyId = null }: {
   experiments: readonly PaperExperimentSummary[];
   onOpen: (id: string) => void;
   /** Asks to stop a run; the caller shows "are you sure". */
@@ -358,24 +463,44 @@ export function PaperRunHistory({ experiments, onOpen, onStop, stopBusyId = null
   /** Asks to delete a finished run; the caller shows "are you sure". */
   onDelete?: (run: StopTarget) => void;
   deleteBusyId?: string | null;
+  /** Opens the launch page with this run's settings (any run, active or finished). */
+  onDuplicate?: (id: string) => void;
+  duplicateBusyId?: string | null;
 }) {
+  const [collapsed, setCollapsed] = useState<readonly string[]>(readCollapsedColumns);
+  const hidden = new Set(collapsed.filter((key) => HISTORY_COLUMNS.some((column) => column.key === key)));
+  const change = (next: readonly string[]) => { setCollapsed(next); saveCollapsedColumns(next); };
+  const toggle = (key: string) => change(hidden.has(key) ? [...hidden].filter((other) => other !== key) : [...hidden, key]);
   return <section className="paper-card">
-    <div className="paper-card-title"><div><span className="eyebrow">HISTORY</span><h2>Server experiments</h2></div><span className="paper-count-chip">{experiments.length} recorded</span></div>
+    <div className="paper-card-title"><div><span className="eyebrow">HISTORY</span><h2>Server experiments</h2></div>
+      <div className="paper-row-actions">{hidden.size > 0 && <button type="button" className="paper-text-button" onClick={() => change([])}>
+        Show all columns ({hidden.size} hidden)</button>}<span className="paper-count-chip">{experiments.length} recorded</span></div></div>
     <div className="table-wrap"><table className="paper-run-table paper-history-table">
-      <thead><tr><th>Strategy</th><th>Status</th><th>Total PnL <InfoTooltip label="total PnL" en="Each exchange's account equity (balance plus open positions) against its start: the virtual starting balance in Paper, the real balance at the start in LIVE. From the last account snapshot; fees included, funding not." ru="Капитал счёта каждой биржи (баланс плюс открытые позиции) против старта: виртуального стартового баланса в Paper, настоящего баланса на старте в LIVE. По последнему снимку счёта; комиссии учтены, funding — нет." /></th><th>Strategy parameters <InfoTooltip label="strategy parameters" en="The parameters a Python strategy was started with; runs of one strategy differ only here. Pine runs have none." ru="Параметры, с которыми запущена Python-стратегия; прогоны одной стратегии отличаются только здесь. У Pine-прогонов их нет." /></th><th>Venues</th><th>Markets</th><th>Timeframe</th><th>Tracks</th><th>Capital / venue <InfoTooltip label="paper starting capital per venue" en="Initial virtual USDC balance assigned separately to each exchange when the run started. This is not a current account balance." ru="Начальный условный баланс в USDC, отдельно выделенный каждой бирже при запуске. Это не текущий остаток счёта." /></th><th>Started</th><th>Duration <InfoTooltip label="paper run duration" en="Elapsed time from the start until the end of the run. For an active run this grows while the page refreshes. A run that never started has no duration." ru="Время от начала до окончания сеанса. У активного сеанса оно увеличивается при обновлении страницы. Если сеанс не начался, длительности нет." /></th><th>Ended</th><th>Actions</th></tr></thead>
-      <tbody>{experiments.map((item) => <tr key={item.id} className="paper-history-row" tabIndex={0} aria-label={`Open run of ${item.strategyName}`}
-        onClick={() => onOpen(item.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(item.id); } }}><td><strong>{item.strategyName}</strong>{item.live && <> <span className="paper-live-badge">LIVE</span></>}</td><td><strong>{visibleStatus(item)}</strong></td><td className="paper-history-pnl">{item.pnl?.length
-          ? item.pnl.map((row) => <div key={row.venue}><span>{row.venue}</span> {row.total === null ? '—'
-            : <b className={pnlClass(row.total)}>{signedNumber(row.total)}{row.percent === null ? '' : ` (${signedNumber(row.percent)}%)`}</b>}</div>)
-          : '—'}</td><td>{paramsCell(item.params)}</td><td>{item.venues?.join(', ') || '—'}</td><td>{marketNames(item.markets)}</td><td>{item.timeframe ?? '—'}</td><td>{item.trackCount}</td><td>{item.live ? 'real' : item.capitalPerVenue == null ? '—' : `${item.capitalPerVenue.toLocaleString()} USDC`}</td><td>{formatDate(item.startedAt)}</td><td>{formatDuration(item)}</td><td>{formatDate(item.endedAt)}</td>
-        <td>{onStop && canStopRun(item.status) && <button type="button" className="paper-text-button paper-stop-button" disabled={stopBusyId !== null}
+      <thead><tr>{HISTORY_COLUMNS.map((column) => hidden.has(column.key)
+        ? <th key={column.key} className="paper-col-collapsed"><button type="button" className="paper-col-toggle paper-col-expand"
+          aria-label={`Show column ${column.title}`} title={`Show ${column.title}`} onClick={() => toggle(column.key)}>{column.title}</button></th>
+        : <th key={column.key}>{column.title}{column.tip && <> {column.tip}</>}<button type="button" className="paper-col-toggle"
+          aria-label={`Hide column ${column.title}`} title="Collapse this column: its values are hidden" onClick={() => toggle(column.key)}>‹</button></th>)}
+        <th>Actions</th></tr></thead>
+      <tbody>{runListOrder(experiments).map((item) => <tr key={item.id} className={`paper-history-row${!item.live ? ''
+        : canStopRun(item.status) ? ' paper-history-row-live' : ' paper-history-row-live-ended'}`}
+        tabIndex={0} aria-label={`Open ${item.live ? 'LIVE ' : ''}run of ${item.strategyName}`}
+        onClick={() => onOpen(item.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(item.id); } }}>
+        {HISTORY_COLUMNS.map((column) => hidden.has(column.key)
+          ? <td key={column.key} className="paper-col-collapsed" aria-hidden="true" />
+          : <td key={column.key} className={column.className}>{column.cell(item)}</td>)}
+        <td><div className="paper-row-actions">{onStop && canStopRun(item.status) && <button type="button" className="paper-text-button paper-stop-button" disabled={stopBusyId !== null}
           aria-label={`Stop run ${item.id} of ${item.strategyName}`}
           onClick={(event) => { event.stopPropagation(); onStop(stopTargetOf(item)); }}
           onKeyDown={(event) => event.stopPropagation()}>{stopBusyId === item.id ? 'Stopping…' : item.status === 'stopping' ? 'Retry stop' : 'Stop'}</button>}
           {onDelete && !canStopRun(item.status) && <button type="button" className="paper-text-button paper-stop-button" disabled={deleteBusyId !== null}
             aria-label={`Delete run ${item.id} of ${item.strategyName}`}
             onClick={(event) => { event.stopPropagation(); onDelete(stopTargetOf(item)); }}
-            onKeyDown={(event) => event.stopPropagation()}>{deleteBusyId === item.id ? 'Deleting…' : 'Delete'}</button>}</td></tr>)}</tbody>
+            onKeyDown={(event) => event.stopPropagation()}>{deleteBusyId === item.id ? 'Deleting…' : 'Delete'}</button>}
+          {onDuplicate && <button type="button" className="paper-text-button" disabled={duplicateBusyId !== null}
+            aria-label={`Run a duplicate of run ${item.id} of ${item.strategyName}`} title="Opens the launch page with this run's settings"
+            onClick={(event) => { event.stopPropagation(); onDuplicate(item.id); }}
+            onKeyDown={(event) => event.stopPropagation()}>{duplicateBusyId === item.id ? 'Opening…' : 'Run Duplicate'}</button>}</div></td></tr>)}</tbody>
     </table></div>
   </section>;
 }
@@ -423,7 +548,11 @@ export function PaperRunActivity({ activity, loading, refreshFailed, pageIndex, 
   </>;
 }
 
-export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
+export function PaperRuns({ onPrepare, onDuplicate }: {
+  onPrepare: () => void;
+  /** Run Duplicate: opens the launch page with this run's settings; rejects with the reason it could not. */
+  onDuplicate?: (id: string) => Promise<void>;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(idFromPath);
   const [capabilities, setCapabilities] = useState<PaperCapabilities | null>(null);
   const [experiments, setExperiments] = useState<PaperExperimentSummary[] | null>(null);
@@ -451,6 +580,8 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
   const [confirmDelete, setConfirmDelete] = useState<StopTarget | null>(null);
   const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState('');
+  const [duplicateBusyId, setDuplicateBusyId] = useState<string | null>(null);
+  const [duplicateError, setDuplicateError] = useState('');
   const [stopError, setStopError] = useState('');
   const [refreshToken, setRefreshToken] = useState(0);
 
@@ -562,6 +693,19 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
     }
   };
 
+  const duplicateRun = async (id: string) => {
+    if (!onDuplicate || duplicateBusyId) return;
+    setDuplicateBusyId(id);
+    setDuplicateError('');
+    try {
+      await onDuplicate(id);
+    } catch (reason) {
+      setDuplicateError(errorMessage(reason));
+    } finally {
+      setDuplicateBusyId(null);
+    }
+  };
+
   const canStop = detail && canStopRun(detail.status);
   return (
     <section className="paper-page" aria-labelledby="paper-runs-title">
@@ -573,6 +717,7 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
         ? <div className="paper-slots-note" role="status"><Clock3 size={16} /><span>{capabilities.activeExperiments} of {capabilities.maxConcurrentExperiments} runs are active. To start a new one, stop one of them.</span></div>
         : capabilities && !capabilities.available && <div className="paper-preview-notice" role="status"><AlertTriangle size={18} /><div><strong>New launches unavailable.</strong><span> {capabilities.reason || 'The server has not enabled Paper admission.'}</span></div></div>}
       {refreshError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>Status refresh failed.</strong><span> Try Refresh now. {lastRefreshedAt && `Last complete refresh: ${formatDate(lastRefreshedAt)}.`}</span></div></div>}
+      {duplicateError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>The run's settings could not be copied.</strong><span> {duplicateError}</span></div></div>}
       {deleteError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>The run was not deleted.</strong><span> {deleteError}</span></div></div>}
       {stopError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>Stop was not confirmed by the server.</strong><span> This run may still occupy the active slot. Refresh its status before trying again.</span></div></div>}
       <div className="paper-runs-toolbar"><span>{lastRefreshedAt ? `Last updated ${formatDate(lastRefreshedAt)} · automatic refresh every 5 seconds` : 'Waiting for the first server response…'}</span><button className="paper-text-button" type="button" onClick={() => setRefreshToken((value) => value + 1)}>Refresh now</button></div>
@@ -631,7 +776,8 @@ export function PaperRuns({ onPrepare }: { onPrepare: () => void }) {
       {!selectedId && (experiments === null ? <div className="paper-empty-runs"><Clock3 size={26} /><h2>{refreshError ? 'Cannot load server runs' : 'Loading server runs…'}</h2></div>
         : experiments.length === 0 ? <div className="paper-empty-runs"><ShieldCheck size={26} /><h2>No paper runs recorded <InfoTooltip label="empty paper runs" en="The server returned an empty experiment list. Saving a strategy or a Paper draft does not create a run." ru="Сервер вернул пустой список экспериментов. Сохранение стратегии или черновика Paper не создаёт сеанс." /></h2><button type="button" className="paper-text-button" onClick={onPrepare}>Prepare an experiment <ArrowRight size={15} /></button></div>
           : <PaperRunHistory experiments={experiments} onOpen={(id) => openRun(id)} onStop={setConfirmStop} stopBusyId={stopBusyId}
-            onDelete={setConfirmDelete} deleteBusyId={deleteBusyId} />)}
+            onDelete={setConfirmDelete} deleteBusyId={deleteBusyId}
+            {...(onDuplicate ? { onDuplicate: (id: string) => { void duplicateRun(id); } } : {})} duplicateBusyId={duplicateBusyId} />)}
       {confirmStop && <StopRunDialog run={confirmStop} busy={stopBusyId === confirmStop.id}
         onCancel={() => setConfirmStop(null)} onConfirm={() => { void stopRun(confirmStop); }} />}
       {confirmDelete && <DeleteRunDialog run={confirmDelete} busy={deleteBusyId === confirmDelete.id}

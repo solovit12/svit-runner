@@ -6,15 +6,3 @@ export class UnsupportedPineFeatureError extends Error {
     this.name = 'UnsupportedPineFeatureError';
   }
 }
-
-function executableSource(source: string): string {
-  return source
-    .replace(/"(?:\\.|[^"\\])*"/g, '""')
-    .replace(/\/\/.*$/gm, '');
-}
-
-export function assertNoUnsupportedExternalSeries(source: string): void {
-  const executable = executableSource(source);
-  const match = executable.match(/\brequest\s*\.\s*(security(?:_lower_tf)?)\s*\(/m);
-  if (match) throw new UnsupportedPineFeatureError(`request.${match[1]}`);
-}

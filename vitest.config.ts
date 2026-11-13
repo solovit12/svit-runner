@@ -6,7 +6,7 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 60_000,
     fileParallelism: false,
-    // .local holds frozen engine releases (full copies of the repo) and run data.
-    exclude: ['vendor/**', 'node_modules/**', 'dist/**', '.local/**'],
+    // .local holds frozen engine releases (full copies of the repo) and run data; .claude holds agent worktrees.
+    exclude: ['vendor/**', 'node_modules/**', 'dist/**', '.local/**', '.claude/**'],
   },
 });

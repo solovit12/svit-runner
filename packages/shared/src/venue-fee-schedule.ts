@@ -71,7 +71,3 @@ export function feeRateFractionToPercent(rate: string): number {
   }
   return parsed * 100;
 }
-
-export function defaultPaperTakerFeeRate(venue: SupportedPerpetualVenue): string {
-  return defaultPerpetualFeeSchedule(venue).takerFeeRate;
-}
