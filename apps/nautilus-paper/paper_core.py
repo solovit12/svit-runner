@@ -11,7 +11,6 @@ from decimal import Decimal
 from pathlib import Path
 import re
 import time
-from types import SimpleNamespace
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model import BookType, OrderSide, QuoteTick, StrategyId
@@ -457,9 +456,30 @@ class TrackStrategy(Strategy):
         self.quote_timing = self.book_timing = None
         self.last_book_key = None
 
-    def account_snapshot(self):
+    def cash_balance(self):
+        """The cash of this market's exchange account, as a string.
+
+        The snapshot reads this once per exchange and hands the same value to every market of that
+        account: the Live position check (another thread, every LIVE_POSITION_CHECK_S) and fills both
+        change the number, and two markets of one account must never report different balances.
+        """
+        venue = getattr(self.controller, "live_venues", {}).get(self.spec.venue_key) if self.live else None
+        if venue is not None:
+            try:
+                cash = venue.cash()  # Hyperliquid: every dex of the account, from the info API
+            except Exception:
+                cash = None
+            if cash is not None:
+                return decimal_string(cash)
         account = self.cache.account_for_venue(self.exec_venue)
         balance = account.balance(USDC) if account else None
+        # Live: the real balance only; before the account arrives there is no virtual stand-in.
+        return (decimal_string(balance.total.as_decimal()) if balance
+                else "0" if self.live else self.run_config["capitalPerVenue"])
+
+    def account_snapshot(self, cash=None):
+        """One market's row of the snapshot; `cash` is the account's cash read once for every
+        market of this exchange (None: read it here, for a caller that asks about one market)."""
         positions = []
         quote = self.last_quote
         mark = ((Decimal(str(quote.bid_price)) + Decimal(str(quote.ask_price))) / 2) if quote is not None else None
@@ -479,19 +499,9 @@ class TrackStrategy(Strategy):
                 row["openedAt"] = datetime.fromtimestamp(position.ts_opened / 1e9, timezone.utc) \
                     .isoformat(timespec="milliseconds").replace("+00:00", "Z")
             positions.append(row)
-        venue = getattr(self.controller, "live_venues", {}).get(self.spec.venue_key) if self.live else None
-        if venue is not None:
-            try:
-                cash = venue.cash()  # Hyperliquid: every dex of the account, from the info API
-            except Exception:
-                cash = None
-            if cash is not None:
-                balance = SimpleNamespace(total=SimpleNamespace(as_decimal=lambda cash=cash: cash))
         return {
             "venue": self.spec.display,
-            # Live: the real balance only; before the account arrives there is no virtual stand-in.
-            "cashBalance": (decimal_string(balance.total.as_decimal()) if balance
-                            else "0" if self.live else self.run_config["capitalPerVenue"]),
+            "cashBalance": self.cash_balance() if cash is None else cash,
             # Live: the real balance at the start, for the run's realized and total PnL.
             **({"startBalance": decimal_string(start)}
                if self.live and (start := (getattr(self.controller, "live_state", {}).get(self.spec.venue_key) or {})

@@ -9,6 +9,14 @@ export function runPath(id?: string | null): string {
   return id ? `${RUNS_PATH}/${encodeURIComponent(id)}` : RUNS_PATH;
 }
 
+/**
+ * A click the browser itself turns into a new tab or window: the middle button, or Cmd/Ctrl/Shift/Alt with the left
+ * one. A link to a run must let such a click through instead of opening the run on the current page.
+ */
+export function opensInNewTab(event: { button?: number; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }): boolean {
+  return (event.button ?? 0) !== 0 || Boolean(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+}
+
 export function isRunSetupPath(pathname: string): boolean {
   return pathname === RUN_SETUP_PATH || pathname === '/paper/setup';
 }

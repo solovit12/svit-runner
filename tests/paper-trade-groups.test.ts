@@ -4,11 +4,11 @@ import type { PaperExperimentActivityFill, PaperStrategyPanel } from '../package
 
 let id = 0;
 function fill(at: string, market: string, kind: 'entry' | 'exit', positionSide: 'long' | 'short', quantity: number, price: number,
-  realizedPnl: number | null = null): PaperExperimentActivityFill {
+  realizedPnl: number | null = null, reason: string | null = null): PaperExperimentActivityFill {
   const buy = (kind === 'entry') === (positionSide === 'long');
   return { id: `f${++id}`, at, venue: 'Lighter', market, kind, side: buy ? 'buy' : 'sell', positionSide,
     quantity: String(quantity), quote: String(quantity * price), price: String(price), fee: '0',
-    realizedPnl: realizedPnl === null ? null : String(realizedPnl) };
+    realizedPnl: realizedPnl === null ? null : String(realizedPnl), reason };
 }
 
 // One Brent/WTI pair: the WTI entry in two fills, the Brent exit in two.
@@ -20,6 +20,42 @@ const LIVE = [
   fill('2026-11-12T10:24:49.200Z', 'BRENTOIL', 'exit', 'long', 10.1749, 90.32, -11.599386),
   fill('2026-11-12T10:24:49.300Z', 'WTI', 'exit', 'short', 23.221, 84.973, 26.785422),
 ];
+
+/** The same pair, with the words the strategy and the engine put on each fill. */
+const WITH_REASONS = [
+  fill('2026-11-16T01:15:32.000Z', 'CRWV', 'entry', 'short', 55.8243, 53.74, null, 'r +7.5 bp from its 15-min mean'),
+  fill('2026-11-16T01:15:32.100Z', 'NBIS', 'entry', 'long', 25.7776, 116.38, null, 'r +7.5 bp from its 15-min mean'),
+  fill('2026-11-16T07:26:20.000Z', 'CRWV', 'exit', 'short', 55.8243, 50.8, 164.12, 'take-profit, r came back +12.0 bp'),
+  fill('2026-11-16T07:26:21.000Z', 'NBIS', 'exit', 'long', 25.7776, 110.3711, -154.89, 'take-profit, r came back +12.0 bp'),
+];
+
+describe('trade reasons', () => {
+  it('keeps why each position opened and closed, and shares one reason over the whole pair', () => {
+    const [group] = groupTrades(WITH_REASONS, [], 'CRWV/NBIS').groups;
+    expect(group!.openReason).toBe('r +7.5 bp from its 15-min mean');
+    expect(group!.closeReason).toBe('take-profit, r came back +12.0 bp');
+    expect(group!.legs.map((leg) => leg.closeReason))
+      .toEqual(['take-profit, r came back +12.0 bp', 'take-profit, r came back +12.0 bp']);
+  });
+
+  it('leaves the group without a shared reason when the legs ended differently', () => {
+    const mixed = [...WITH_REASONS.slice(0, 3),
+      fill('2026-11-16T07:26:21.000Z', 'NBIS', 'exit', 'long', 25.7776, 110.3711, -154.89, 'the run stopped')];
+    const [group] = groupTrades(mixed, [], 'CRWV/NBIS').groups;
+    expect(group!.closeReason).toBeNull();
+    expect(group!.legs.map((leg) => [leg.market, leg.closeReason]))
+      .toEqual([['CRWV', 'take-profit, r came back +12.0 bp'], ['NBIS', 'the run stopped']]);
+  });
+
+  it('says nothing for a run recorded before reasons existed, and not before the position is closed', () => {
+    const [open, closed] = groupTrades([...LIVE,
+      fill('2026-11-16T01:15:32.000Z', 'CRWV', 'entry', 'short', 1, 53.74, null, 'r +7.5 bp from its 15-min mean'),
+    ], [], 'BRENTOIL/WTI, CRWV/NBIS').groups;
+    expect(open!.openReason).toBe('r +7.5 bp from its 15-min mean');
+    expect(open!.closeReason).toBeNull();                       // still open
+    expect([closed!.openReason, closed!.closeReason]).toEqual([null, null]);  // an older run
+  });
+});
 
 describe('trade groups', () => {
   it('turns the fills of a pair into one group with a position per leg', () => {

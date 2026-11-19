@@ -121,7 +121,9 @@ const Message = z.discriminatedUnion('type', [
   z.object({ ...Base, type: z.literal('snapshot'),
     stage: z.enum(['waiting_for_data', 'running', 'recovering', 'stopping']),
     accounts: z.array(SnapshotAccount).length(2), tracks: z.array(SnapshotTrack).min(1).max(MAX_MARKETS_PER_RUN).optional(),
-    panels: z.array(Panel).min(1).max(16).optional() }).strict(),
+    panels: z.array(Panel).min(1).max(16).optional(),
+    /** The owner holds new entries ("Close and hold"); absent means entries are allowed. */
+    entriesHeld: z.literal(true).optional() }).strict(),
   z.object({ ...Base, type: z.literal('event'), market: Market.optional(), message: Text }).strict(),
   z.object({ ...Base, type: z.literal('failure'), market: Market.optional(), message: Text }).strict(),
   z.object({ ...Base, type: z.literal('fill'), venue: Venue,
@@ -129,7 +131,9 @@ const Message = z.discriminatedUnion('type', [
     kind: z.enum(['entry', 'exit']), side: z.enum(['buy', 'sell']),
     positionSide: z.enum(['long', 'short']), quantity: PositiveDecimal,
     quote: NonnegativeDecimal, price: PositiveDecimal, fee: NonnegativeDecimal,
-    realizedPnl: Decimal.nullable() }).strict(),
+    realizedPnl: Decimal.nullable(),
+    /** Why this execution happened ("take-profit, r came back +12.0 bp"); older runs have none. */
+    reason: z.string().min(1).max(120).optional() }).strict(),
   z.object({ ...Base, type: z.literal('stopped'), reason: Text }).strict(),
   /** Generic Pine Paper: one executed Pine order, reported back to the strategy. */
   z.object({ ...Base, type: z.literal('pine_fill'), venue: Venue, market: Market,
@@ -332,6 +336,7 @@ function view(message: Extract<NautilusPaperMessageV1, { type: 'snapshot' }>,
     observedAt: new Date(message.at).toISOString(),
     ...(message.tracks ? { tracks: message.tracks } : {}),
     ...(message.panels ? { panels: message.panels } : {}),
+    ...(message.entriesHeld ? { entriesHeld: true as const } : {}),
     accounts: message.accounts.map((account) => {
       const identity = expected.accounts.find((candidate) => candidate.venue === account.venue)!;
       return { ...account, accountId: identity.accountId, runId: identity.runId };
@@ -670,7 +675,7 @@ function fill(message: Extract<NautilusPaperMessageV1, { type: 'fill' }>): Paper
     market: message.market, kind: message.kind, side: message.side,
     positionSide: message.positionSide, quantity: message.quantity,
     quote: message.quote, price: message.price, fee: message.fee,
-    realizedPnl: message.realizedPnl };
+    realizedPnl: message.realizedPnl, reason: message.reason ?? null };
 }
 
 function cursorFor(detail: PaperExperimentDetail, cursor: string | undefined): number | null {

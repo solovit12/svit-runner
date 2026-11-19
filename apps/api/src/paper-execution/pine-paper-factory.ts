@@ -306,6 +306,34 @@ export function createPinePaperFactory(options: PinePaperFactoryOptions): PaperE
     if (Buffer.byteLength(line) > 1_000_000) throw new Error('Pine order set exceeds the 1 MB command limit.');
     actor.child.stdin.write(line);
   }
+  /**
+   * The owner's "Close positions" on the run page: the engine closes every open position of this
+   * run at market and goes on trading. This is not a Stop - the run keeps its slot, its account and
+   * its strategy, which waits for its next entry exactly as it would after any other exit.
+   *
+   * Only a Python (SDK) strategy can be asked: Pine keeps its own trade list, so a close behind its
+   * back would be mirrored open again on the next bar.
+   */
+  function closePositions(actor: Actor, reason: string, hold = false): void {
+    if (!actor.python) throw new Error('Only a Python strategy run can close its positions and go on; Pine keeps its own trades.');
+    if (actor.stopping || actor.exited) throw new Error('This run is stopping; its positions are being closed already.');
+    // The hold goes first: nothing may open between the close and the hold.
+    if (hold) writeChild(actor, { cmd: 'hold_entries', hold: true, reason });
+    writeChild(actor, { cmd: 'close_positions', reason });
+    record(actor, { type: 'event', message: `Close positions asked by the owner: ${reason}${hold ? ' (new entries held)' : ''}` });
+  }
+
+  /**
+   * "Close and hold" / "Resume entries": while entries are held the run watches prices and manages
+   * and closes what is open, but opens nothing new. Only the owner lifts it.
+   */
+  function holdEntries(actor: Actor, hold: boolean, reason: string): void {
+    if (!actor.python) throw new Error('Only a Python strategy run can hold its entries; Pine decides its own.');
+    if (actor.stopping || actor.exited) throw new Error('This run is stopping.');
+    writeChild(actor, { cmd: 'hold_entries', hold, reason });
+    record(actor, { type: 'event', message: `New entries ${hold ? 'held' : 'allowed again'} by the owner: ${reason}` });
+  }
+
   async function waitExit(actor: Actor, ms: number): Promise<boolean> {
     if (!actor.childExit || actor.exited) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -726,7 +754,9 @@ export function createPinePaperFactory(options: PinePaperFactoryOptions): PaperE
         : `Loading ${PINE_LIVE_HISTORY_BARS} closed ${settings.timeframe} candles per market and starting Pine.` });
       notify(actor, { status: 'warming_up' });
       actor.task = prepare(actor);
-      return { stop: (reason?: string) => stop(actor, reason), snapshot: () => actor.view };
+      return { stop: (reason?: string) => stop(actor, reason), snapshot: () => actor.view,
+        closePositions: async (reason: string, hold?: boolean) => { closePositions(actor, reason, hold); },
+        holdEntries: async (hold: boolean, reason: string) => { holdEntries(actor, hold, reason); } };
     },
     async abortStart(snapshot) {
       const actor = actors.get(snapshot.experimentId);

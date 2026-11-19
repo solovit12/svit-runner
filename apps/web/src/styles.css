@@ -345,6 +345,12 @@ tbody tr:hover { background: #141a1c; }
 .paper-run-detail-header h2 { margin-top: 5px; }
 .paper-run-detail-header p { margin: 7px 0 0; color: #aeb9bd; }
 .paper-stop-button { border-color: #8a5a4c; color: #f0b9aa; }
+/* Close positions: a change inside a run, not the end of it - warm, but not the Stop red. */
+.paper-close-positions-button { border-color: #8a7a4c; color: #f0dfaa; margin-right: 8px; }
+/* Resume entries: the way back from a hold, calm green rather than a warning colour. */
+.paper-resume-entries-button { border-color: #4c8a63; color: #aaf0c4; margin-right: 8px; }
+.paper-held-badge { border: 1px solid #8a7a4c; border-radius: 999px; padding: 1px 8px; color: #f0dfaa;
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
 .paper-run-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
 .paper-run-summary > div { min-width: 0; padding: 10px; border: 1px solid #2b3639; background: #0e1315; }
 .paper-run-summary span, .paper-run-summary strong { display: block; overflow-wrap: anywhere; }
@@ -554,6 +560,9 @@ tbody tr:hover { background: #141a1c; }
 .paper-trade-group span { display: inline-block; margin-right: 16px; color: var(--muted); }
 .paper-trade-group b { color: #d8e1e3; font-weight: 600; }
 .paper-trade-open { color: var(--amber) !important; }
+/* Why the position opened and closed: the strategy's own words, wrapped on its own line when long */
+.paper-trade-reason { max-width: 100%; }
+.paper-fill-reason { max-width: 320px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
 .paper-fills-details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .paper-fills-details[open] > summary { margin-bottom: 10px; }
 .paper-tech-details { margin-top: 22px; padding-top: 14px; border-top: 1px solid #334044; }
@@ -580,6 +589,9 @@ tbody tr:hover { background: #141a1c; }
 .paper-history-row { cursor: pointer; }
 .paper-history-row:hover td { background: #141c1e; }
 .paper-history-row:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
+/* The run name is a link, so a middle or Cmd/Ctrl click opens that run in a new browser tab; in the row it looks like plain text. */
+.paper-run-link { color: inherit; text-decoration: none; }
+.paper-run-link:hover, .paper-run-link:focus-visible { text-decoration: underline; }
 /* LIVE runs (real money) stand out from Paper ones: a running one red (the LIVE badge colour), a finished one amber. */
 .paper-history-row-live td { background: #181214; }
 .paper-history-row-live td:first-child { box-shadow: inset 3px 0 0 var(--red); }
@@ -606,6 +618,8 @@ tbody tr:hover { background: #141a1c; }
 .paper-xyz-notice { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; padding: 11px 13px; border: 1px solid #6b5527; background: #1d1910; color: #f0dfb9; font-size: 13px; line-height: 1.5; }
 .paper-xyz-notice > svg { flex: none; margin-top: 2px; color: var(--amber); }
 .paper-xyz-notice strong { display: block; color: #ffe2a8; }
+/* The pair-legs warning lists one line per exchange, then what to change. */
+.paper-leg-room-notice > div > span { display: block; }
 
 /* Backtest on Hyperliquid: how far back the history reaches and the optional 0xArchive key. */
 .hl-history-panel { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 14px; padding: 11px 13px; border: 1px solid var(--line); background: var(--panel); color: #c5cfd2; font-size: 13px; line-height: 1.5; }
@@ -647,6 +661,10 @@ tbody tr:hover { background: #141a1c; }
 .paper-history-pnl { white-space: nowrap; font-size: 13px; }
 .paper-history-pnl div + div { margin-top: 3px; }
 .paper-history-pnl span { color: #84949a; }
+/* Mean exit in: one line per open pair, the pair name grey like the exchange name of the PnL column. */
+.paper-history-countdown { white-space: nowrap; font-size: 13px; }
+.paper-history-countdown div + div { margin-top: 3px; }
+.paper-history-countdown span { color: #84949a; }
 
 /* Exchange limits: header chip, Accounts table, launch forecast */
 .exchange-limits-chip { display: flex; gap: 5px; align-items: center; padding: 8px 10px; border: 1px solid #2d5945; color: var(--green); background: transparent; cursor: pointer; font: 700 12px/1.25 "Cascadia Code", Consolas, monospace; letter-spacing: .03em; }

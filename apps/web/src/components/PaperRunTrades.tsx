@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { PaperExperimentTrades, PaperStrategyPanel, PaperTradeGroup } from '../lib/api';
+import type { PaperExperimentTrades, PaperStrategyPanel, PaperTradeGroup, PaperTradeLeg } from '../lib/api';
 import { formatDate, pnlClass } from '../lib/format';
 import { InfoTooltip } from './TranslatedText';
 
@@ -55,8 +55,20 @@ export function PaperStrategyPanels({ panels }: { panels: readonly PaperStrategy
   </div>;
 }
 
+/**
+ * Why the position was opened or closed: the one reason every leg names, else each leg's own
+ * ("BRENTOIL: stop · WTI: the run stopped"), else nothing.
+ */
+function reasonOf(group: PaperTradeGroup, shared: string | null, of: (leg: PaperTradeLeg) => string | null): string | null {
+  if (shared) return shared;
+  const named = group.legs.filter((leg) => of(leg));
+  return named.length ? named.map((leg) => `${leg.market}: ${of(leg)}`).join(' · ') : null;
+}
+
 function GroupRows({ group, nowMs }: { group: PaperTradeGroup; nowMs: number }) {
   const pair = group.legs.length > 1;
+  const why = reasonOf(group, group.openReason, (leg) => leg.openReason);
+  const whyClosed = reasonOf(group, group.closeReason, (leg) => leg.closeReason);
   return <tbody>
     <tr className="paper-trade-group">
       <td colSpan={9}>
@@ -66,6 +78,8 @@ function GroupRows({ group, nowMs }: { group: PaperTradeGroup; nowMs: number }) 
         <span>held {lasted(group.openedAt, group.closedAt, nowMs)}</span>
         {group.closedAt !== null && group.realizedPnl !== null && <span>result <b className={pnlClass(group.realizedPnl)}>{signed(group.realizedPnl)} USDC</b></span>}
         {group.fees > 0 && <span>fees <b>{group.fees.toFixed(2)} USDC</b></span>}
+        {why && <span className="paper-trade-reason">entry reason: <b>{why}</b></span>}
+        {whyClosed && <span className="paper-trade-reason">exit reason: <b>{whyClosed}</b></span>}
       </td>
     </tr>
     {group.legs.map((leg) => <tr key={`${leg.market}:${leg.openedAt}`}>
@@ -94,8 +108,8 @@ export function PaperTradeGroups({ trades, live = false, nowMs = Date.now() }: {
   return <section className="paper-activity-panel" aria-labelledby="paper-trade-groups-title">
     <div className="paper-card-title"><div><span className="eyebrow">EXECUTION HISTORY</span>
       <h2 id="paper-trade-groups-title">Trades by position <InfoTooltip label="trades by position"
-        en={`Every ${live ? 'real' : 'virtual'} fill belongs to a position of its market, from the first entry until the market is flat again. The legs of one pair (opened within a minute, the pairs of the strategy) are shown together with their sum. Result = realized PnL of the exit fills; fees as charged; funding is not included.`}
-        ru={`Каждое ${live ? 'реальное' : 'условное'} исполнение относится к позиции своего рынка — от первого входа до момента, когда позиция снова пуста. Ноги одной пары (открытые в пределах минуты, пары стратегии) показаны вместе и с суммой. Результат — реализованный PnL выходов; комиссии как списаны; funding не входит.`} /></h2>
+        en={`Every ${live ? 'real' : 'virtual'} fill belongs to a position of its market, from the first entry until the market is flat again. The legs of one pair (opened within a minute, the pairs of the strategy) are shown together with their sum. Result = realized PnL of the exit fills; fees as charged; funding is not included. The entry and exit reasons are the strategy's own words for the order that executed, or what the engine did instead (an exchange-side stop or take-profit, the run stopping, a public data gap); runs recorded before reasons existed show none.`}
+        ru={`Каждое ${live ? 'реальное' : 'условное'} исполнение относится к позиции своего рынка — от первого входа до момента, когда позиция снова пуста. Ноги одной пары (открытые в пределах минуты, пары стратегии) показаны вместе и с суммой. Результат — реализованный PnL выходов; комиссии как списаны; funding не входит. Причина входа и выхода — слова самой стратегии о заявке, которая исполнилась, либо действие движка (биржевой стоп или тейк-профит, остановка прогона, разрыв публичных данных); у прогонов, записанных до появления причин, их нет.`} /></h2>
       <p>{trades === null ? 'Loading…' : closed.length
         ? <>Closed: {closed.length} · wins {wins} · result <b className={pnlClass(total)}>{signed(total)} USDC</b>{trades.truncated ? ' · the oldest are not listed' : ''}</>
         : 'No closed positions yet'}</p></div></div>

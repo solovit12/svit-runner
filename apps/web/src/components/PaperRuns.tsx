@@ -1,14 +1,14 @@
 import { AlertTriangle, ArrowLeft, ArrowRight, Clock3, ShieldCheck } from 'lucide-react';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
 import {
   deletePaperExperiment, listPaperExperiments, loadLiveAccounts, loadPaperCapabilities, loadPaperExperiment, loadPaperExperimentActivity,
-  loadPaperExperimentTrades, stopPaperExperiment,
+  loadPaperExperimentTrades, stopPaperExperiment, closePaperExperimentPositions, holdPaperExperimentEntries,
   type PaperCapabilities, type PaperExperimentActivity, type PaperExperimentDetail, type PaperExperimentStatus,
   type PaperExperimentSummary, type PaperExperimentTrades,
 } from '../lib/api';
 import { PaperStrategyPanels, PaperTradeGroups } from './PaperRunTrades';
 import { formatDate, pnlClass } from '../lib/format';
-import { runIdFromPath, runPath } from '../lib/run-paths';
+import { opensInNewTab, runIdFromPath, runPath } from '../lib/run-paths';
 import { NativeRunNotice } from './NativeRunNotice';
 import { InfoTooltip } from './TranslatedText';
 import { XyzHoursNotice } from './XyzHoursNotice';
@@ -118,6 +118,103 @@ export function StopRunDialog({ run, busy, onCancel, onConfirm }: {
       </div>
     </section>
   </div>;
+}
+
+/**
+ * A run whose positions can be closed while it goes on trading: a running Python strategy. Pine
+ * keeps its own trade list, so a close behind its back would be mirrored open again.
+ */
+export function canClosePositions(detail: Pick<PaperExperimentDetail, 'status' | 'accountModel'>): boolean {
+  return detail.status === 'running' && detail.accountModel === 'python_live_v1';
+}
+
+/** True while the run holds new entries: it still manages what is open, but opens nothing new. */
+export function entriesHeld(detail: Pick<PaperExperimentDetail, 'runtime'>): boolean {
+  return detail.runtime?.entriesHeld === true;
+}
+
+/** How many positions the run holds right now, from the owner's own observation. */
+export function openPositionCount(detail: Pick<PaperExperimentDetail, 'runtime'>): number {
+  return (detail.runtime?.accounts ?? []).reduce((sum, account) => sum + (account.positions?.length ?? 0), 0);
+}
+
+/** "Are you sure?" before every position of a run is closed at market. The run is not stopped. */
+export function ClosePositionsDialog({ run, positions, busy, hold = false, onCancel, onConfirm }: {
+  run: StopTarget;
+  /** Positions open right now; 0 still allows the press (the owner may be ahead of the refresh). */
+  positions: number;
+  busy: boolean;
+  /** "Close and hold": after the close the run opens nothing new until the owner allows it. */
+  hold?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return <div className="strategy-dialog-backdrop" role="presentation" onClick={onCancel}>
+    <section className="strategy-dialog paper-stop-dialog" role="alertdialog" aria-modal="true"
+      aria-labelledby="paper-close-title" aria-describedby="paper-close-text" onClick={(event) => event.stopPropagation()}>
+      <header className="strategy-dialog-heading"><h3 id="paper-close-title">
+        {hold ? 'Close everything and hold new entries?' : 'Close every position now?'}</h3></header>
+      <div className="paper-stop-dialog-body">
+        <p id="paper-close-text">{positions === 0
+          ? <>No position is open right now in <strong>{run.strategyName}</strong>.</>
+          : <><strong>{run.strategyName}</strong> holds {positions} open position{positions === 1 ? '' : 's'}
+            {run.live ? <> on {run.exchanges}</> : null}. {run.live ? 'They are closed at market on the exchange right away.'
+              : 'They are closed at market right away.'}</>}</p>
+        {hold
+          ? <p>The run is <strong>not</strong> stopped: it goes on watching prices and managing anything it still
+            holds, but it opens <strong>nothing new</strong> until you press <strong>Resume entries</strong>.</p>
+          : <p>The run is <strong>not</strong> stopped: it keeps trading and waits for its next entry, exactly as
+            after a take-profit. It may enter again as soon as its rule says so.</p>}
+        <p className="paper-stop-dialog-id">Run {run.id}</p>
+      </div>
+      <div className="strategy-dialog-actions">
+        <button type="button" className="paper-text-button" onClick={onCancel} disabled={busy}>Cancel</button>
+        <button type="button" className="paper-stop-confirm" onClick={onConfirm} disabled={busy}>
+          {busy ? 'Closing…' : hold ? 'Yes, close and hold' : 'Yes, close positions'}</button>
+      </div>
+    </section>
+  </div>;
+}
+
+/**
+ * What the owner can do to a run from its own page: close everything open without stopping the run,
+ * and stop it. Close positions comes first and is the milder of the two; Stop ends the run.
+ */
+export function RunPageActions({ detail, closeBusyId, stopBusyId, holdBusyId, onClose, onCloseAndHold, onResume, onStop }: {
+  detail: PaperExperimentDetail;
+  closeBusyId: string | null;
+  stopBusyId: string | null;
+  holdBusyId?: string | null;
+  onClose: () => void;
+  /** Close everything and hold new entries until the owner allows them again. */
+  onCloseAndHold?: () => void;
+  /** Allow new entries again after a hold. */
+  onResume?: () => void;
+  onStop: () => void;
+}) {
+  const busy = closeBusyId !== null || stopBusyId !== null || (holdBusyId ?? null) !== null;
+  const held = entriesHeld(detail);
+  return <>
+    {canClosePositions(detail) && !held && <button className="paper-text-button paper-close-positions-button" type="button"
+      aria-label={`Close the open positions of run ${detail.id}`}
+      disabled={busy} onClick={onClose}
+      title="Close everything open at market; the run keeps trading">
+      {closeBusyId === detail.id ? 'Closing…' : 'Close positions'}</button>}
+    {canClosePositions(detail) && !held && onCloseAndHold && <button className="paper-text-button paper-close-positions-button" type="button"
+      aria-label={`Close the open positions of run ${detail.id} and hold new entries`}
+      disabled={busy} onClick={onCloseAndHold}
+      title="Close everything open at market and open nothing new until you allow it">
+      {holdBusyId === detail.id ? 'Closing…' : 'Close and hold'}</button>}
+    {canClosePositions(detail) && held && onResume && <button className="paper-text-button paper-resume-entries-button" type="button"
+      aria-label={`Allow new entries of run ${detail.id} again`}
+      disabled={busy} onClick={onResume}
+      title="Let the strategy open new positions again">
+      {holdBusyId === detail.id ? 'Allowing…' : 'Resume entries'}</button>}
+    {canStopRun(detail.status) && <button className="paper-text-button paper-stop-button" type="button"
+      disabled={stopBusyId !== null} onClick={onStop}>
+      {stopBusyId === detail.id ? 'Stopping…' : detail.status === 'stopping' ? 'Retry stop'
+        : detail.live ? 'Stop and close all' : 'Stop experiment'}</button>}
+  </>;
 }
 
 /** "Are you sure?" before a finished run and all its data are deleted from the server. */
@@ -329,6 +426,26 @@ function formatDuration(item: PaperExperimentSummary): string {
   return days > 0 ? `${days}d ${hours}h` : hours > 0 ? `${hours}h ${remainingMinutes}m` : `${minutes}m`;
 }
 
+/**
+ * How long each open pair may still be held before the strategy closes it at the mean. The run's
+ * `mean_after_hours` is counted from the entry fill; when the hours are over the pair closes as soon
+ * as the ratio touches its mean, so the cell says it is waiting instead of showing a time.
+ */
+function meanExitCell(item: PaperExperimentSummary): ReactNode {
+  const rows = item.meanExits ?? [];
+  if (rows.length === 0) return '\u2014';
+  return rows.map((row, index) => <div key={`${row.label}:${index}`}><span>{row.label}</span> {meanExitLeft(row.at)}</div>);
+}
+
+function meanExitLeft(at: string): string {
+  const left = Date.parse(at) - Date.now();
+  if (!Number.isFinite(left)) return '\u2014';
+  if (left <= 0) return 'waiting for the mean';
+  const minutes = Math.floor(left / 60_000);
+  const hours = Math.floor(minutes / 60);
+  return hours > 0 ? `${hours}h ${minutes % 60}m` : minutes > 0 ? `${minutes}m` : '< 1m';
+}
+
 function visibleStatus(item: PaperExperimentSummary): string {
   return item.status === 'stopping' && /^(Paper runtime stop failed:|Cannot confirm failed-start cleanup:)/.test(item.reason ?? '')
     ? 'Stop needs attention'
@@ -419,7 +536,9 @@ const PARTIAL_TITLE = 'The oldest fills of a very long run, or a position withou
 
 const HISTORY_COLUMNS: readonly HistoryColumn[] = [
   { key: 'strategy', title: 'Strategy', className: 'paper-history-strategy',
-    cell: (item) => <><strong>{item.strategyName}</strong>{item.live && <> <span className="paper-live-badge">LIVE</span></>}</> },
+    // A real link, so the run can be opened in a new tab (middle click, Cmd/Ctrl click, right click → Open in new tab).
+    cell: (item) => <a className="paper-run-link" href={runPath(item.id)} title="Open this run · middle or Cmd/Ctrl click opens it in a new tab">
+      <strong>{item.strategyName}</strong>{item.live && <> <span className="paper-live-badge">LIVE</span></>}</a> },
   { key: 'status', title: 'Status', cell: (item) => <strong>{visibleStatus(item)}</strong> },
   { key: 'pnl', title: 'Total PnL', className: 'paper-history-pnl',
     tip: <InfoTooltip label="total PnL" en="Each exchange's account equity (balance plus open positions) against its start: the virtual starting balance in Paper, the real balance at the start in LIVE. From the last account snapshot; fees included, funding not." ru="Капитал счёта каждой биржи (баланс плюс открытые позиции) против старта: виртуального стартового баланса в Paper, настоящего баланса на старте в LIVE. По последнему снимку счёта; комиссии учтены, funding — нет." />,
@@ -427,6 +546,9 @@ const HISTORY_COLUMNS: readonly HistoryColumn[] = [
       ? item.pnl.map((row) => <div key={row.venue}><span>{row.venue}</span> {row.total === null ? '—'
         : <b className={pnlClass(row.total)}>{signedNumber(row.total)}{row.percent === null ? '' : ` (${signedNumber(row.percent)}%)`}</b>}</div>)
       : '—' },
+  { key: 'meanExit', title: 'Mean exit in', className: 'paper-history-countdown',
+    tip: <InfoTooltip label="mean exit countdown" en="A pair that has not reached its take-profit is held for the strategy's “After this many hours close at the mean” time; after that it closes as soon as the ratio touches its mean again. Here is the time left until then, counted from the entry fill, one line per open pair. “waiting for the mean” means those hours are over and the pair closes at the first touch. Empty when nothing is open, or the strategy has no such rule." ru="Пара, которая не дошла до тейк-профита, держится столько часов, сколько задано в параметре «After this many hours close at the mean»; после этого она закрывается, как только перекос коснётся своей средней. Здесь — сколько времени до этого осталось, считая от исполнения входа, по строке на каждую открытую пару. «waiting for the mean» — часы уже прошли, и пара закроется при первом касании средней. Пусто, если ничего не открыто или у стратегии нет такого правила." />,
+    cell: (item) => meanExitCell(item) },
   { key: 'closed', title: 'Closed positions', className: 'paper-history-number',
     tip: <InfoTooltip label="closed positions" en="Positions the run has closed, on all its exchanges: one market from its entry until it is flat again. A pair strategy (a pairs parameter or a pair tracker on the run page) counts both legs of a pair opened together as one position, as in Trades by position; every other strategy counts each position on its own." ru="Закрытые позиции прогона на всех его биржах: одна монета от входа до полного выхода. У парной стратегии (есть параметр pairs или трекер пары на странице прогона) обе ноги пары, открытые вместе, — одна позиция, как в «Trades by position»; у остальных стратегий каждая позиция считается отдельно." />,
     cell: (item) => <span title={item.trades?.partial ? PARTIAL_TITLE : undefined}>{closedPositionsText(item.trades)}</span> },
@@ -468,6 +590,21 @@ export function PaperRunHistory({ experiments, onOpen, onStop, stopBusyId = null
   duplicateBusyId?: string | null;
 }) {
   const [collapsed, setCollapsed] = useState<readonly string[]>(readCollapsedColumns);
+  /**
+   * A click on a row. A plain one opens the run on this page (and must stop the link in the row from reloading
+   * everything); a middle or Cmd/Ctrl click opens the run in a new tab — the browser does it itself on the link,
+   * and we do the same for a click anywhere else in the row.
+   */
+  const openRow = (event: MouseEvent<HTMLElement>, id: string) => {
+    const onLink = event.target instanceof Element && event.target.closest('a[href]') !== null;
+    if (opensInNewTab(event)) {
+      if (!onLink) window.open(runPath(id), '_blank', 'noopener');
+      return;
+    }
+    if (event.button !== 0) return;
+    event.preventDefault();
+    onOpen(id);
+  };
   const hidden = new Set(collapsed.filter((key) => HISTORY_COLUMNS.some((column) => column.key === key)));
   const change = (next: readonly string[]) => { setCollapsed(next); saveCollapsedColumns(next); };
   const toggle = (key: string) => change(hidden.has(key) ? [...hidden].filter((other) => other !== key) : [...hidden, key]);
@@ -485,7 +622,8 @@ export function PaperRunHistory({ experiments, onOpen, onStop, stopBusyId = null
       <tbody>{runListOrder(experiments).map((item) => <tr key={item.id} className={`paper-history-row${!item.live ? ''
         : canStopRun(item.status) ? ' paper-history-row-live' : ' paper-history-row-live-ended'}`}
         tabIndex={0} aria-label={`Open ${item.live ? 'LIVE ' : ''}run of ${item.strategyName}`}
-        onClick={() => onOpen(item.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(item.id); } }}>
+        onClick={(event) => openRow(event, item.id)} onAuxClick={(event) => openRow(event, item.id)}
+        onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(item.id); } }}>
         {HISTORY_COLUMNS.map((column) => hidden.has(column.key)
           ? <td key={column.key} className="paper-col-collapsed" aria-hidden="true" />
           : <td key={column.key} className={column.className}>{column.cell(item)}</td>)}
@@ -502,6 +640,8 @@ export function PaperRunHistory({ experiments, onOpen, onStop, stopBusyId = null
             onClick={(event) => { event.stopPropagation(); onDuplicate(item.id); }}
             onKeyDown={(event) => event.stopPropagation()}>{duplicateBusyId === item.id ? 'Opening…' : 'Run Duplicate'}</button>}</div></td></tr>)}</tbody>
     </table></div>
+    <p className="paper-card-footnote">A click opens the run on this page. A middle click, or Cmd (Ctrl) with a click,
+      opens it in a new browser tab — several runs can be watched side by side.</p>
   </section>;
 }
 
@@ -542,7 +682,7 @@ export function PaperRunActivity({ activity, loading, refreshFailed, pageIndex, 
           : fills.length === 0 ? <p className="paper-activity-empty">{activity.coverage === 'durable_journal'
             ? (live ? 'No trades were executed on Lighter in this run.' : 'No virtual trades were executed in this run.')
             : (live ? 'No trades found in the available journal history.' : 'No virtual trades found in the available journal history.')}</p>
-            : <div className="table-wrap"><table className="paper-run-table paper-fill-table"><thead><tr><th>Time</th><th>Exchange</th><th>Market</th><th>Action</th><th>Side</th><th>Position</th><th>Quantity</th><th>Price</th><th>Value</th><th>Fee</th><th>Realized PnL</th></tr></thead><tbody>{fills.map((fill) => <tr key={fill.id}><td>{formatDate(fill.at)}</td><td>{fill.venue}</td><td>{fill.market}</td><td className="paper-fill-kind">{fill.kind}</td><td>{fill.side}</td><td>{fill.positionSide}</td><td>{fill.quantity}</td><td>{fill.price === null ? '—' : `${fill.price} USDC`}</td><td>{fill.quote} USDC</td><td>{fill.fee === null ? '—' : `${fill.fee} USDC`}</td><td>{fill.realizedPnl === null ? '—' : `${fill.realizedPnl} USDC`}</td></tr>)}</tbody></table></div>}
+            : <div className="table-wrap"><table className="paper-run-table paper-fill-table"><thead><tr><th>Time</th><th>Exchange</th><th>Market</th><th>Action</th><th>Side</th><th>Position</th><th>Quantity</th><th>Price</th><th>Value</th><th>Fee</th><th>Realized PnL</th><th>Reason</th></tr></thead><tbody>{fills.map((fill) => <tr key={fill.id}><td>{formatDate(fill.at)}</td><td>{fill.venue}</td><td>{fill.market}</td><td className="paper-fill-kind">{fill.kind}</td><td>{fill.side}</td><td>{fill.positionSide}</td><td>{fill.quantity}</td><td>{fill.price === null ? '—' : `${fill.price} USDC`}</td><td>{fill.quote} USDC</td><td>{fill.fee === null ? '—' : `${fill.fee} USDC`}</td><td>{fill.realizedPnl === null ? '—' : `${fill.realizedPnl} USDC`}</td><td className="paper-fill-reason">{fill.reason ?? '—'}</td></tr>)}</tbody></table></div>}
       {(pageIndex > 0 || activity?.nextFillsCursor) && <div className="paper-fill-pagination"><span>{activity ? `${fills.length ? `${first}–${last}` : '0'}${activity.totalFills === null ? ' shown' : ` of ${activity.totalFills}`}` : 'Page unavailable'}</span><button type="button" className="paper-text-button" disabled={pageIndex === 0} onClick={onPrevious}>Previous</button><button type="button" className="paper-text-button" disabled={!activity?.nextFillsCursor} onClick={onNext}>Next</button></div>}
     </details>
   </>;
@@ -583,6 +723,10 @@ export function PaperRuns({ onPrepare, onDuplicate }: {
   const [duplicateBusyId, setDuplicateBusyId] = useState<string | null>(null);
   const [duplicateError, setDuplicateError] = useState('');
   const [stopError, setStopError] = useState('');
+  const [confirmClose, setConfirmClose] = useState<(StopTarget & { hold?: boolean }) | null>(null);
+  const [closeBusyId, setCloseBusyId] = useState<string | null>(null);
+  const [holdBusyId, setHoldBusyId] = useState<string | null>(null);
+  const [closeError, setCloseError] = useState('');
   const [refreshToken, setRefreshToken] = useState(0);
 
   useEffect(() => {
@@ -676,6 +820,43 @@ export function PaperRuns({ onPrepare, onDuplicate }: {
     }
   };
 
+  /**
+   * Runs after "Yes, close positions" / "Yes, close and hold": everything open is closed at market.
+   * The run is not stopped; with `hold` it also opens nothing new until Resume entries.
+   */
+  const closePositions = async (target: StopTarget & { hold?: boolean }) => {
+    if (closeBusyId || holdBusyId) return;
+    const hold = target.hold === true;
+    (hold ? setHoldBusyId : setCloseBusyId)(target.id);
+    setCloseError('');
+    try {
+      const updated = await closePaperExperimentPositions(target.id, hold);
+      if (selectedId === target.id) setDetail(updated);
+      setRefreshToken((value) => value + 1);
+    } catch (reason) {
+      setCloseError(errorMessage(reason));
+    } finally {
+      (hold ? setHoldBusyId : setCloseBusyId)(null);
+      setConfirmClose(null);
+    }
+  };
+
+  /** "Resume entries": the strategy may open new positions again. Nothing else changes. */
+  const resumeEntries = async (id: string) => {
+    if (holdBusyId || closeBusyId) return;
+    setHoldBusyId(id);
+    setCloseError('');
+    try {
+      const updated = await holdPaperExperimentEntries(id, false);
+      if (selectedId === id) setDetail(updated);
+      setRefreshToken((value) => value + 1);
+    } catch (reason) {
+      setCloseError(errorMessage(reason));
+    } finally {
+      setHoldBusyId(null);
+    }
+  };
+
   /** Runs after "Yes, delete" in the dialog: the run and its data are gone from the server. */
   const deleteRun = async (target: StopTarget) => {
     if (deleteBusyId) return;
@@ -719,6 +900,7 @@ export function PaperRuns({ onPrepare, onDuplicate }: {
       {refreshError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>Status refresh failed.</strong><span> Try Refresh now. {lastRefreshedAt && `Last complete refresh: ${formatDate(lastRefreshedAt)}.`}</span></div></div>}
       {duplicateError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>The run's settings could not be copied.</strong><span> {duplicateError}</span></div></div>}
       {deleteError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>The run was not deleted.</strong><span> {deleteError}</span></div></div>}
+      {closeError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>Positions were not closed.</strong><span> {closeError} The run is untouched and goes on trading.</span></div></div>}
       {stopError && <div className="paper-preview-notice" role="alert"><AlertTriangle size={18} /><div><strong>Stop was not confirmed by the server.</strong><span> This run may still occupy the active slot. Refresh its status before trying again.</span></div></div>}
       <div className="paper-runs-toolbar"><span>{lastRefreshedAt ? `Last updated ${formatDate(lastRefreshedAt)} · automatic refresh every 5 seconds` : 'Waiting for the first server response…'}</span><button className="paper-text-button" type="button" onClick={() => setRefreshToken((value) => value + 1)}>Refresh now</button></div>
 
@@ -730,8 +912,11 @@ export function PaperRuns({ onPrepare, onDuplicate }: {
             markets={[...new Set(detail.tracks.filter((track) => track.venue === 'Hyperliquid' && isXyzMarket(track.market)).map((track) => track.market))]} />}
           <PaperPositionsTable detail={detail} accountNames={accountNames} />
           <section className="paper-activity-panel paper-run-overview" aria-labelledby="paper-run-title">
-            <div className="paper-run-detail-header"><div><span className="eyebrow">EXPERIMENT / {detail.id}</span><h2 id="paper-run-title">{detail.strategyName}{detail.live && <> <span className="paper-live-badge">LIVE — real money · {liveExchangesOf(detail)}</span></>}</h2><p>Status: <strong>{visibleStatus(detail)}</strong>{visibleStatus(detail) === 'Stop needs attention' && <> <InfoTooltip label="stop needs attention" en="The server could not confirm that shutdown finished. This experiment may still block a new launch. Try Retry stop after the runtime issue is resolved." ru="Сервер не смог подтвердить завершение остановки. Этот эксперимент может блокировать новый запуск. После устранения проблемы можно повторить остановку." /></>}</p></div>{canStop && <button className="paper-text-button paper-stop-button" type="button" disabled={stopBusyId !== null}
-              onClick={() => setConfirmStop({ id: detail.id, strategyName: detail.strategyName, live: Boolean(detail.live), exchanges: liveExchangesOf(detail) })}>{stopBusyId === detail.id ? 'Stopping…' : detail.status === 'stopping' ? 'Retry stop' : detail.live ? 'Stop and close all' : 'Stop experiment'}</button>}</div>
+            <div className="paper-run-detail-header"><div><span className="eyebrow">EXPERIMENT / {detail.id}</span><h2 id="paper-run-title">{detail.strategyName}{detail.live && <> <span className="paper-live-badge">LIVE — real money · {liveExchangesOf(detail)}</span></>}</h2><p>Status: <strong>{visibleStatus(detail)}</strong>{entriesHeld(detail) && <> <span className="paper-held-badge">new entries held</span></>}{visibleStatus(detail) === 'Stop needs attention' && <> <InfoTooltip label="stop needs attention" en="The server could not confirm that shutdown finished. This experiment may still block a new launch. Try Retry stop after the runtime issue is resolved." ru="Сервер не смог подтвердить завершение остановки. Этот эксперимент может блокировать новый запуск. После устранения проблемы можно повторить остановку." /></>}</p></div><RunPageActions detail={detail} closeBusyId={closeBusyId} stopBusyId={stopBusyId} holdBusyId={holdBusyId}
+              onClose={() => setConfirmClose({ id: detail.id, strategyName: detail.strategyName, live: Boolean(detail.live), exchanges: liveExchangesOf(detail) })}
+              onCloseAndHold={() => setConfirmClose({ id: detail.id, strategyName: detail.strategyName, live: Boolean(detail.live), exchanges: liveExchangesOf(detail), hold: true })}
+              onResume={() => { void resumeEntries(detail.id); }}
+              onStop={() => setConfirmStop({ id: detail.id, strategyName: detail.strategyName, live: Boolean(detail.live), exchanges: liveExchangesOf(detail) })} /></div>
             {canStop && <NativeRunNotice detail={detail} />}
             <LiveStopOutcome detail={detail} />
             <div className="paper-run-summary"><div><span>Started</span><strong>{formatDate(detail.startedAt)}</strong></div>{detail.endedAt ? <div><span>Ended</span><strong>{formatDate(detail.endedAt)}</strong></div> : <div><span>Running for</span><strong>{formatDuration(detail)}</strong></div>}<div><span>Timeframe</span><strong>{detail.settings.timeframe}</strong></div><PaperRunHealth detail={detail} /></div>
@@ -780,6 +965,10 @@ export function PaperRuns({ onPrepare, onDuplicate }: {
             {...(onDuplicate ? { onDuplicate: (id: string) => { void duplicateRun(id); } } : {})} duplicateBusyId={duplicateBusyId} />)}
       {confirmStop && <StopRunDialog run={confirmStop} busy={stopBusyId === confirmStop.id}
         onCancel={() => setConfirmStop(null)} onConfirm={() => { void stopRun(confirmStop); }} />}
+      {confirmClose && <ClosePositionsDialog run={confirmClose} hold={confirmClose.hold === true}
+        busy={(confirmClose.hold === true ? holdBusyId : closeBusyId) === confirmClose.id}
+        positions={detail && detail.id === confirmClose.id ? openPositionCount(detail) : 0}
+        onCancel={() => setConfirmClose(null)} onConfirm={() => { void closePositions(confirmClose); }} />}
       {confirmDelete && <DeleteRunDialog run={confirmDelete} busy={deleteBusyId === confirmDelete.id}
         onCancel={() => setConfirmDelete(null)} onConfirm={() => { void deleteRun(confirmDelete); }} />}
     </section>

@@ -22,7 +22,7 @@ import type {
 export type PaperCapabilities = PaperExperimentCapabilities;
 export type CreatePaperExperimentInput = StartPaperExperimentRequest;
 export type { PaperExperimentActivity, PaperExperimentDetail, PaperExperimentSummary, PaperExperimentStatus, PaperExperimentTrack,
-  PaperExperimentTrades, PaperStrategyPanel, PaperTradeGroup } from '../../../../packages/shared/src/paper-experiment-contracts';
+  PaperExperimentTrades, PaperStrategyPanel, PaperTradeGroup, PaperTradeLeg } from '../../../../packages/shared/src/paper-experiment-contracts';
 
 export class ApiResponseError extends Error {
   constructor(
@@ -265,6 +265,28 @@ export async function loadPaperExperimentTrades(id: string, signal?: AbortSignal
 /** Deletes a finished run and its data on the server for good. */
 export async function deletePaperExperiment(id: string): Promise<void> {
   await parse<{ deleted: string }>(await apiFetch(`/api/paper-experiments/${encodeURIComponent(id)}`, { method: 'DELETE' }));
+}
+
+/**
+ * Close every open position of a running experiment at market, without stopping it: the run keeps
+ * trading and waits for its next entry. Only a Python strategy run can do this.
+ */
+export async function closePaperExperimentPositions(id: string, hold = false): Promise<PaperExperimentDetail> {
+  const result = await parse<{ experiment: PaperExperimentDetail }>(
+    await apiFetch(`/api/paper-experiments/${encodeURIComponent(id)}/close-positions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hold }) }));
+  return result.experiment;
+}
+
+/**
+ * Hold new entries of a running experiment, or allow them again. The run keeps watching prices and
+ * managing what is open; only new entries are off while the hold is on.
+ */
+export async function holdPaperExperimentEntries(id: string, hold: boolean): Promise<PaperExperimentDetail> {
+  const result = await parse<{ experiment: PaperExperimentDetail }>(
+    await apiFetch(`/api/paper-experiments/${encodeURIComponent(id)}/entries-hold`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hold }) }));
+  return result.experiment;
 }
 
 export async function stopPaperExperiment(id: string): Promise<PaperExperimentDetail> {

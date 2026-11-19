@@ -176,6 +176,18 @@ class Strategy:
         price_left_limit, entry_wait_expired, position_limit, shared_capital_exhausted,
         notional_below_minimum or fillable_below_minimum."""
 
+    def on_close_request(self, ctx, reason):
+        """The owner pressed "Close positions" on the run page: close what is open at market
+        and keep trading. The run does not stop; after this the strategy waits for its next
+        entry as it would after any exit.
+
+        The default closes this market's position. A strategy that keeps its own state (a pair
+        holding two markets) overrides this to clear that state as well, so it does not think it
+        still holds what the exchange no longer has.
+        """
+        if ctx.position:
+            ctx.close_all(reason=reason)
+
 
 def describe_strategy(cls):
     if not isinstance(cls, type) or not issubclass(cls, Strategy) or cls is Strategy:

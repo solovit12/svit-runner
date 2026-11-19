@@ -65,6 +65,11 @@ REVIVE_DELAYS_MS = (10_000, 30_000, 60_000, 300_000)
 # Runs now continue across UTC days; bound per-run journal growth instead.
 OUTBOX_CAP_BYTES = 512 * 1024 * 1024
 SNAPSHOT_IDLE_MS = 15_000
+# Public data of another exchange this new counts as "it is delivering right now".
+VENUE_FRESH_MS = 5_000
+# A snapshot is a report, not a trade: this many failures in a row (about a minute) end the run
+# with a reason, while a single one is announced and retried on the next tick.
+SNAPSHOT_FAILURES_BEFORE_STOP = 12
 MAX_SNAPSHOT_PANELS = 16  # status panels of Python strategies per snapshot (the API accepts at most this many)
 
 
@@ -261,6 +266,8 @@ LIVE_ORDER_NO_ANSWER_S = 30
 # hedged legs (Strategy.exchange_take_profit) also a reduce-only take-profit the same distance on the other side.
 SAFETY_ATTRS = {"stop": "safety", "tp": "safety_tp"}
 SAFETY_LABELS = {"stop": "stop", "tp": "take-profit"}
+#: Longest "why it was executed" text written with a fill (the ledger accepts up to 120).
+MAX_FILL_REASON = 120
 
 LIVE_REFUSAL_PAUSE_MS = 1_000
 LIVE_RATE_LIMIT_PAUSE_MS = 30_000
@@ -618,6 +625,8 @@ class PineTrackStrategy(TrackStrategy):
 
     def _gate(self, request, at_ms):
         """Whether a request can meet the current book now ("go"), later ("wait"), or never (a reason)."""
+        if request.kind == "entry" and self.controller.entries_held:
+            return "entries_on_hold"  # the owner holds new entries; exits are never held
         if self.controller.live is not None:
             # Live sends at once; the exchange matches against its own book. Only an IOC whose limit
             # the newest price has already left is skipped, without waiting for anything.
@@ -777,7 +786,8 @@ class PineTrackStrategy(TrackStrategy):
             qty, buy = Decimal(str(event.last_qty)), event.order_side == OrderSide.BUY
             before = self.position
             closing = min(qty, abs(before)) if before != 0 and (before < 0) == buy else Decimal("0")
-            self._book_fill(event)
+            self._book_fill(event, "the run stopped" if self.controller.stopping
+                            else "public data gap: position closed")
             if not self.controller.stopping:
                 # A data-gap close: the strategy's trades shrink as for a late fill.
                 self.manager.late_fill("buy" if buy else "sell", closing, qty - closing)
@@ -798,7 +808,7 @@ class PineTrackStrategy(TrackStrategy):
         price = Decimal(str(event.last_px))
         if self.controller.live is not None and state["filled"] + qty > state["requested"]:
             # More than the order asked for: booked, so the stop closes it too, and the run halts.
-            self._book_fill(event)
+            self._book_fill(event, state["request"].why, state["request"].kind)
             state["quote"] += (state["requested"] - state["filled"]) * price
             state["filled"] = state["requested"]
             self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: {self.xname} filled order {order_id} beyond its size "
@@ -811,7 +821,7 @@ class PineTrackStrategy(TrackStrategy):
             raise ValueError("Pine order overfill")
         if self.controller.live is not None:
             self.controller.live_refusals[self.spec.venue_key].filled(self.spec.key)
-        self._book_fill(event)
+        self._book_fill(event, state["request"].why, state["request"].kind)
         if state["filled"] == state["requested"]:
             self._complete_inflight()
 
@@ -821,7 +831,7 @@ class PineTrackStrategy(TrackStrategy):
         qty, buy = Decimal(str(event.last_qty)), event.order_side == OrderSide.BUY
         before = self.position
         closing = min(qty, abs(before)) if before != 0 and (before < 0) == buy else Decimal("0")
-        self._book_fill(event)
+        self._book_fill(event, "late fill of an order that had ended")
         self.controller.live_refusals[self.spec.venue_key].filled(self.spec.key)
         self.manager.late_fill("buy" if buy else "sell", closing, qty - closing)
         if not self.controller.stopping:
@@ -840,13 +850,17 @@ class PineTrackStrategy(TrackStrategy):
         qty, buy = Decimal(str(event.last_qty)), event.order_side == OrderSide.BUY
         before = self.position
         closing = min(qty, abs(before)) if before != 0 and (before < 0) == buy else Decimal("0")
-        self._book_fill(event)
+        self._book_fill(event, f"exchange-side {label} executed")
         self.manager.late_fill("buy" if buy else "sell", closing, qty - closing)
         self.controller.live_halt_on(self.spec.venue_key, f"{self.spec.market}: the exchange-side {label} executed on {self.xname} at {event.last_px}; "
                                   "the run stops and closes everything")
 
-    def _book_fill(self, event):
-        """Position, average price, fees and the fill events of one execution."""
+    def _book_fill(self, event, why=None, why_kind=None):
+        """Position, average price, fees and the fill events of one execution.
+
+        `why`: short text of what caused this execution, written with the fill and shown on the run
+        page next to the closed position. `why_kind` ("entry" / "exit") limits it to the matching
+        part when one execution both closes and opens (a reversal)."""
         qty = Decimal(str(event.last_qty))
         price = Decimal(str(event.last_px))
         fee = event.commission.as_decimal() if event.commission else Decimal("0")
@@ -880,12 +894,14 @@ class PineTrackStrategy(TrackStrategy):
             self.open_fee += entry_fee
             parts.append(("entry", opening, "long" if buy else "short", entry_fee, None))
         for index, (kind, part_qty, position_side, part_fee, realized) in enumerate(parts):
+            reason = why if why and why_kind in (None, kind) else None
             self.controller.emitter.emit(
                 "fill", venue=self.spec.display, market=self.spec.market, kind=kind,
                 side="buy" if buy else "sell", positionSide=position_side, quantity=decimal_string(part_qty),
                 quote=decimal_string(part_qty * price), price=decimal_string(price), fee=decimal_string(part_fee),
                 realizedPnl=decimal_string(realized) if realized is not None else None,
                 id=base_id if len(parts) == 1 else f"{base_id}:{index}",
+                **({"reason": reason[:MAX_FILL_REASON]} if reason else {}),
             )
         if self.controller.live:
             self.controller.check_live_limits()
@@ -1414,8 +1430,8 @@ class PineTrackStrategy(TrackStrategy):
         self.last_order_book_revision = self.book_revision
         self.recovery_cash = None
 
-    def account_snapshot(self):
-        row = super().account_snapshot()
+    def account_snapshot(self, cash=None):
+        row = super().account_snapshot(cash)
         row["pendingOrders"] = self.manager.pending_count() + (1 if self.inflight else 0)
         row["signals"] = self.manager.signals
         return row
@@ -1465,6 +1481,7 @@ class SdkTrackStrategy(PineTrackStrategy):
 
     def _decide(self, quote, at_ms):
         self.manager.input_source_ns = quote.ts_event
+        self.runner.entries_held = self.controller.entries_held
         if self.runner.instrument is None:
             instrument = self._instrument()
             self.runner.instrument = Instrument(
@@ -1476,6 +1493,18 @@ class SdkTrackStrategy(PineTrackStrategy):
         else:
             self.manager.on_quote(quote.bid_price, quote.ask_price, at_ms)
 
+    def close_request(self, reason):
+        """The owner's "Close positions": the strategy closes this market at market and trades on.
+
+        Returns whether the strategy was asked (a strategy that has not started yet is not).
+        """
+        if not self.runner.started or self.controller.stopping:
+            return False
+        at_ms = now_ms()
+        self._guard("close request", lambda: self.runner.close_request(reason, at_ms))
+        self._try_orders(at_ms)
+        return True
+
     def _flush_reports(self):
         if not self.runner.started:
             return
@@ -1486,8 +1515,8 @@ class SdkTrackStrategy(PineTrackStrategy):
         self._pump(at_ms)
         self.flush_logs()
 
-    def account_snapshot(self):
-        row = super().account_snapshot()
+    def account_snapshot(self, cash=None):
+        row = super().account_snapshot(cash)
         row["signals"] = self.manager.signals
         row["rejectedSignals"] = self.runner.rejected
         return row
@@ -1519,6 +1548,9 @@ class RuntimeController:
         self.stopping = False
         self.failed = False
         self.stop_reason = None
+        # The owner's "Close and hold": no NEW entries until they allow them again. Exits, closes
+        # and everything else keep working. Forgotten if the run is started again (a new run).
+        self.entries_held = False
         self.stage = "waiting_for_data"
         self.strategies = {}
         # Source-side bridges per market; revival resubscribes a market's book through it.
@@ -1553,6 +1585,7 @@ class RuntimeController:
             emitter.defer_fsync = True
         # One venue per exchange of the run: credentials, account check and refusal reading.
         self.live_venues = {}
+        self.snapshot_failures = 0
         if self.live is not None:
             for venue_key in sorted({spec.venue_key for spec in self.specs.values()}):
                 real = REAL_VENUES[venue_key]((self.live.get("accounts") or {}).get(venue_key))
@@ -1998,6 +2031,39 @@ class RuntimeController:
                 if spec.venue_key == key:
                     self.begin_recovery(track_key)
 
+    def other_venues_now(self, broken_venue, at_ms=None):
+        """How fresh every other exchange's public data is at this moment, as readable parts.
+
+        When one exchange goes silent this answers the first question of every such incident: whose
+        side is it on. Another exchange still delivering at the same second means this server's
+        connection is working and the silent exchange is the one with the problem (run 2026-11-14,
+        Hyperliquid alone was silent for 90 s while Lighter kept its stream).
+        """
+        at_ms = now_ms() if at_ms is None else at_ms
+        ages = []
+        for venue_key in dict.fromkeys(spec.venue_key for spec in self.specs.values()):
+            if venue_key == broken_venue:
+                continue
+            seen = [self.last_public_ms[key] for key, spec in self.specs.items()
+                    if spec.venue_key == venue_key and self.last_public_ms[key]]
+            ages.append((SPECS[venue_key].display, at_ms - max(seen) if seen else None))
+        return ages
+
+    def report_other_venues(self, key):
+        """One line in the run's events: what the other exchanges were doing at the moment of a gap."""
+        broken = SPECS[self.specs[key].venue_key].display
+        ages = self.other_venues_now(self.specs[key].venue_key)
+        if not ages:
+            self.event(key, f"{broken} went silent; this run trades no other exchange, so there is "
+                            "nothing to compare it with.")
+            return
+        parts = ", ".join(f"{display} {age} ms ago" if age is not None else f"{display} nothing yet"
+                          for display, age in ages)
+        verdict = ("this server's connection is working, so the silence is on its side"
+                   if any(age is not None and age <= VENUE_FRESH_MS for _, age in ages)
+                   else "the other exchanges are quiet too, so this server's connection may be the cause")
+        self.event(key, f"{broken} went silent; last public data elsewhere: {parts} — {verdict}.")
+
     def begin_recovery(self, key):
         floor_ns = time.time_ns()
         if not self.recovering:
@@ -2012,6 +2078,7 @@ class RuntimeController:
             self.flush_diagnostics(force=True, reason="recovery", close=True)
             self.emitter.emit("phase", stage="recovering",
                               message="Public data interrupted; the affected markets wait for reconnection and fresh market data")
+            self.report_other_venues(key)
         if key not in self.recovery_gaps:
             self.recovery_gaps[key] = {
                 "started_ns": time.monotonic_ns(), "started_ms": now_ms(), "discarded": 0, "attempt": 0, "revives": 0,
@@ -2345,6 +2412,55 @@ class RuntimeController:
             finally:
                 self.stop_event.set()
 
+    def hold_entries(self, hold, reason):
+        """The owner's "Close and hold" / "Resume entries" on the run page.
+
+        While entries are held the run keeps everything else: it watches prices, manages and closes
+        what is open, and writes its journal; only NEW entries are off until the owner allows them
+        again. The strategies are told through ctx.entries_held, and the order engine refuses an
+        entry anyway (a strategy that ignores the flag still cannot open).
+        """
+        hold = bool(hold)
+        if hold == self.entries_held:
+            return self.entries_held
+        self.entries_held = hold
+        for strategy in self.strategies.values():
+            runner = getattr(strategy, "runner", None)
+            if runner is not None:
+                runner.entries_held = hold
+        for key in self.strategies:
+            self.safe_event(key, f"new entries are {'on hold' if hold else 'allowed again'}: {reason}")
+        self.snapshot_guarded()
+        return self.entries_held
+
+    def close_positions(self, reason):
+        """The owner pressed "Close positions" on the run page.
+
+        Every strategy of the run closes what it holds at market, through its own exit path, so that
+        what it believes always matches what the exchange holds; the run is NOT stopped and goes on
+        waiting for its next entry. Only Python (SDK) strategies can be asked: a Pine strategy keeps
+        its own trade list, and closing behind its back would only make the engine open it again.
+        """
+        # This never raises: a stdin command that fails stops the run, and a button that closes
+        # positions must never be able to do that. What happened is written to the run's events.
+        if self.stopping:
+            return 0
+        asked = []
+        for key, strategy in self.strategies.items():
+            try:
+                if hasattr(strategy, "close_request") and strategy.close_request(reason):
+                    asked.append(key)
+            except Exception as exc:
+                self.safe_event(key, f"could not close {self.specs[key].market}: {type(exc).__name__}: {exc}")
+        for key in asked:
+            self.safe_event(key, f"closing what is open on {self.specs[key].market} at market: {reason}; "
+                                 "the run goes on and waits for its next entry")
+        if not asked:
+            for key in self.strategies:
+                self.safe_event(key, f"nothing was closed: {reason}; no started Python strategy on this market")
+                break
+        return len(asked)
+
     def record_unresolved_gaps(self):
         for key, gap in self.recovery_gaps.items():
             if gap.get("ended"):
@@ -2368,11 +2484,16 @@ class RuntimeController:
                     "rejectedSignals", "stalePriceObservationsSkipped")
         for venue, venue_spec in SPECS.items():
             rows = []
+            # One reading of this exchange's cash for all of its markets: another thread may change
+            # it between two markets, and the rows of one account must agree (run 9c9620b0).
+            cash = None
             for key, spec in self.specs.items():
                 if spec.venue_key != venue:
                     continue
                 strategy = self.strategies.get(key)
-                row = strategy.account_snapshot() if strategy else {
+                if strategy is not None and cash is None:
+                    cash = strategy.cash_balance()
+                row = strategy.account_snapshot(cash) if strategy else {
                     "venue": spec.display, "cashBalance": self.config["capitalPerVenue"],
                     **{name: 0 for name in counters}, "priceReady": False, "positions": [],
                 }
@@ -2407,7 +2528,31 @@ class RuntimeController:
                     panels[panel["key"]] = panel
         if panels:
             extra["panels"] = [panels[key] for key in sorted(panels)][:MAX_SNAPSHOT_PANELS]
+        if self.entries_held:
+            extra["entriesHeld"] = True
         self.emitter.emit("snapshot", stage=self.stage, accounts=accounts, **extra)
+
+    def snapshot_guarded(self):
+        """A snapshot that never ends the run on its own; True while the run goes on.
+
+        A snapshot is a report, not a trade: one that fails costs the page a picture of the accounts,
+        not the safety of the run. The failure is announced (which also tells the API the engine is
+        alive) and tried again on the next tick; only SNAPSHOT_FAILURES_BEFORE_STOP failures in a row
+        stop the run, with a reason instead of the silent death of the watchdog (run 9c9620b0).
+        """
+        try:
+            self.snapshot()
+        except Exception as exc:
+            self.snapshot_failures += 1
+            self.emitter.emit("event", message=f"{self.run_word} account snapshot failed "
+                              f"({self.snapshot_failures}): {type(exc).__name__}: {exc}")
+            if self.snapshot_failures >= SNAPSHOT_FAILURES_BEFORE_STOP:
+                self.fail(f"{self.run_word} account snapshot failed {self.snapshot_failures} times in a row: "
+                          f"{type(exc).__name__}: {exc}")
+                return False
+            return True
+        self.snapshot_failures = 0
+        return True
 
     def strategy_bars(self, item, live):
         if not self.python:
@@ -2577,6 +2722,12 @@ async def monitor_stdin(controller, offline_sources):
                     if controller.config["mode"] != "offline":
                         return
                     continue  # offline tests keep feeding books while the run stops
+                if command == "hold_entries":
+                    controller.hold_entries(item.get("hold", True), str(item.get("reason", "the owner asked"))[:200])
+                    continue
+                if command == "close_positions":
+                    controller.close_positions(str(item.get("reason", "the owner asked"))[:200])
+                    continue
                 if controller.extra_command(command, item):
                     continue
                 if command in ("bars", "bar"):
@@ -2706,7 +2857,8 @@ async def watchdog(controller, node_task):
         # Open positions refresh every 5 s so their unrealized PnL stays current.
         if at_ms - last_snapshot >= (5_000 if signature != last_signature or controller.has_open_positions()
                                      else SNAPSHOT_IDLE_MS):
-            controller.snapshot()
+            if not controller.snapshot_guarded():
+                return
             last_snapshot, last_signature = at_ms, signature
 
 

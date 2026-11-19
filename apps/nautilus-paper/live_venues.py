@@ -300,11 +300,21 @@ class HyperliquidVenue(LiveVenue):
         return self.read_account()["positions"]
 
     def account(self):
-        """The last account read, read again when older than HYPERLIQUID_ACCOUNT_MAX_AGE_S."""
+        """The last account read, read again when older than HYPERLIQUID_ACCOUNT_MAX_AGE_S.
+
+        An unanswered read keeps the last account instead of raising: a hiccup of the info API must
+        not change the number this run reports or refuse an entry. `fetch_positions` still reads
+        afresh and reports its failure, so the position check knows it did not see the exchange.
+        """
         with self._lock:
             cached = self._account
         if cached is None or time.monotonic() - cached[0] > HYPERLIQUID_ACCOUNT_MAX_AGE_S:
-            return self.read_account()
+            try:
+                return self.read_account()
+            except Exception:
+                if cached is None:
+                    raise
+                return cached[1]
         return cached[1]
 
     def cash(self):

@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
-  StartPaperExperimentSchema, type PaperExperimentDetail, type PaperExperimentSummary, type PaperRunTradeStats, type VenuePnl,
+  StartPaperExperimentSchema, type PaperExperimentDetail, type PaperExperimentSummary, type PaperRunMeanExit,
+  type PaperRunTradeStats, type VenuePnl,
 } from '../../../packages/shared/src/paper-experiment-contracts.js';
 import { venueTotalPnl } from '../../../packages/shared/src/paper-pnl.js';
 import type { StrategyCatalogV1 } from './strategy-catalog.js';
@@ -16,6 +17,7 @@ import {
 } from './paper-execution/paper-experiment-activity.js';
 import { forgetNautilusPaperRun, readNautilusPaperLedgerSnapshot, readNautilusPaperSnapshot } from './paper-execution/nautilus-paper-ledger.js';
 import { NautilusOutboxChecks } from './paper-execution/outbox-check.js';
+import { meanExitsOf } from './paper-execution/mean-exit.js';
 
 export function isCrossOriginPaperWrite(request: FastifyRequest): boolean {
   if (request.headers['sec-fetch-site'] === 'cross-site') return true;
@@ -174,13 +176,30 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
     });
   };
 
+  /**
+   * The wait until each open pair closes at its mean, for the runs list. Only an active run has
+   * positions, and its runtime is the one in memory, so no journal is read for this.
+   */
+  const meanExitsFor = (summary: PaperExperimentSummary): readonly PaperRunMeanExit[] | undefined => {
+    if (summary.endedAt) return undefined;
+    try {
+      const detail = paperExperiments.get(summary.id);
+      const exits = detail ? meanExitsOf(detail) : [];
+      return exits.length ? exits : undefined;
+    } catch (error) {
+      app.log.warn({ err: error, experimentId: summary.id }, 'Mean exit countdown unavailable');
+      return undefined;
+    }
+  };
+
   app.get('/api/paper-experiments', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
     return { experiments: paperExperiments.list().map((summary) => {
       prepare(summary);
       const pnl = pnlOf(summary);
       const trades = statsOf(summary);
-      return { ...summary, ...(pnl?.length ? { pnl } : {}), ...(trades ? { trades } : {}) };
+      const meanExits = meanExitsFor(summary);
+      return { ...summary, ...(pnl?.length ? { pnl } : {}), ...(trades ? { trades } : {}), ...(meanExits ? { meanExits } : {}) };
     }) };
   });
 
@@ -291,6 +310,52 @@ export function registerPaperRoutes(app: FastifyInstance, dependencies: PaperRou
       if (paperRunsDir) forgetNautilusPaperRun(experiment.id, path.join(paperRunsDir, experiment.id));
     }
     return { deleted: request.params.id };
+  });
+
+  /**
+   * "Close positions": close everything this run holds at market, on the exchange, and let the run
+   * go on trading. Deliberately a different route from Stop - the run keeps its slot and its
+   * strategy, which waits for its next entry as after any exit.
+   */
+  app.post<{ Params: { id: string }; Body: { hold?: unknown } }>('/api/paper-experiments/:id/close-positions', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (isCrossOriginPaperWrite(request)) {
+      return reply.code(403).send({ kind: 'PAPER_ORIGIN_FORBIDDEN', error: 'Paper changes require a same-origin request.' });
+    }
+    const hold = (request.body as { hold?: unknown } | undefined)?.hold === true;
+    try {
+      return { experiment: await paperExperiments.closePositions(request.params.id,
+        hold ? 'the owner pressed Close and hold' : 'the owner pressed Close positions', hold) };
+    } catch (error) {
+      if (error instanceof PaperExperimentControllerError) {
+        const status = error.kind === 'NOT_FOUND' ? 404
+          : error.kind === 'PAPER_CLOSE_UNSUPPORTED' ? 409 : 503;
+        return reply.code(status).send({ kind: error.kind, error: error.message, ...(error.experiment ? { experiment: error.experiment } : {}) });
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * Hold new entries of a running run, or allow them again. The run keeps watching prices and
+   * managing what is open either way; only new entries are off while the hold is on.
+   */
+  app.post<{ Params: { id: string }; Body: { hold?: unknown } }>('/api/paper-experiments/:id/entries-hold', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (isCrossOriginPaperWrite(request)) {
+      return reply.code(403).send({ kind: 'PAPER_ORIGIN_FORBIDDEN', error: 'Paper changes require a same-origin request.' });
+    }
+    const hold = request.body?.hold === true;
+    try {
+      return { experiment: await paperExperiments.holdEntries(request.params.id, hold,
+        hold ? 'the owner held new entries' : 'the owner allowed new entries') };
+    } catch (error) {
+      if (error instanceof PaperExperimentControllerError) {
+        const status = error.kind === 'NOT_FOUND' ? 404 : error.kind === 'PAPER_CLOSE_UNSUPPORTED' ? 409 : 503;
+        return reply.code(status).send({ kind: error.kind, error: error.message, ...(error.experiment ? { experiment: error.experiment } : {}) });
+      }
+      throw error;
+    }
   });
 
   app.post<{ Params: { id: string } }>('/api/paper-experiments/:id/stop', async (request, reply) => {

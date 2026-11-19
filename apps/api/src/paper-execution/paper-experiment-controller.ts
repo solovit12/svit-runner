@@ -53,6 +53,8 @@ export type PaperExperimentControllerErrorKind =
   | 'PAPER_START_FAILED'
   | 'PAPER_STOP_FAILED'
   | 'PAPER_RUN_ACTIVE'
+  | 'PAPER_CLOSE_UNSUPPORTED'
+  | 'PAPER_CLOSE_FAILED'
   | 'NOT_FOUND';
 
 export class PaperExperimentControllerError extends Error {
@@ -84,6 +86,17 @@ export interface PaperExperimentRuntimeHandle {
   stop(reason?: string): Promise<PaperExperimentStopProof>;
   /** Optional read-only view from the live owner; never inferred from control timestamps. */
   snapshot?(): PaperExperimentRuntimeView;
+  /**
+   * The owner's "Close positions": close every open position of the run at market and go on
+   * trading. Never a stop - the slot, the account and the strategy stay exactly as they are.
+   * Only an owner that can ask its strategy to close implements it (a Python strategy run).
+   */
+  closePositions?(reason: string, hold?: boolean): Promise<void>;
+  /**
+   * Hold or allow new entries without stopping the run: held, it still watches prices and manages
+   * and closes what is open. Only an owner that can tell its strategy implements it.
+   */
+  holdEntries?(hold: boolean, reason: string): Promise<void>;
 }
 
 /** Injection seam: only a fully validated, actual execution owner may implement this. */
@@ -456,6 +469,68 @@ export class PaperExperimentControllerV1 {
       return this.#store!.setStatus(id, 'stopping');
     }
     return this.#stopManaged(id, managed);
+  }
+
+  /**
+   * "Close positions" on a run page: every open position is closed at market and the run keeps
+   * trading, waiting for its next entry. Not a stop - nothing about the run's ownership changes,
+   * so the returned detail is the running experiment, unchanged.
+   */
+  async closePositions(id: string, reason: string, hold = false): Promise<PaperExperimentDetail> {
+    const experiment = this.get(id);
+    if (!experiment) throw new PaperExperimentControllerError('NOT_FOUND', 'Paper experiment not found.');
+    if (experiment.status !== 'running') {
+      throw new PaperExperimentControllerError('PAPER_CLOSE_UNSUPPORTED',
+        `This run is ${experiment.status}; only a running run can close its positions and go on.`, experiment);
+    }
+    const managed = this.#managed.get(id);
+    if (!managed?.handle || managed.stopRequested) {
+      throw new PaperExperimentControllerError('PAPER_NOT_OWNER',
+        'This API process does not own the active Paper runtime.', experiment);
+    }
+    const close = managed.handle.closePositions?.bind(managed.handle);
+    if (!close) {
+      throw new PaperExperimentControllerError('PAPER_CLOSE_UNSUPPORTED',
+        'Only a Python strategy run can close its positions and go on; Pine keeps its own trades.', experiment);
+    }
+    try {
+      await close(reason, hold);
+    } catch (error) {
+      // The run is untouched: a command that did not reach the engine changed nothing.
+      throw new PaperExperimentControllerError('PAPER_CLOSE_FAILED',
+        error instanceof Error ? error.message : 'The engine did not accept Close positions.', experiment);
+    }
+    return experiment;
+  }
+
+  /**
+   * Hold new entries of a running run, or allow them again. The run is never stopped: it goes on
+   * watching prices and managing what is open, and opens nothing new while the hold is on.
+   */
+  async holdEntries(id: string, hold: boolean, reason: string): Promise<PaperExperimentDetail> {
+    const experiment = this.get(id);
+    if (!experiment) throw new PaperExperimentControllerError('NOT_FOUND', 'Paper experiment not found.');
+    if (experiment.status !== 'running') {
+      throw new PaperExperimentControllerError('PAPER_CLOSE_UNSUPPORTED',
+        `This run is ${experiment.status}; only a running run holds or allows entries.`, experiment);
+    }
+    const managed = this.#managed.get(id);
+    if (!managed?.handle || managed.stopRequested) {
+      throw new PaperExperimentControllerError('PAPER_NOT_OWNER',
+        'This API process does not own the active Paper runtime.', experiment);
+    }
+    const holdEntries = managed.handle.holdEntries?.bind(managed.handle);
+    if (!holdEntries) {
+      throw new PaperExperimentControllerError('PAPER_CLOSE_UNSUPPORTED',
+        'Only a Python strategy run can hold its entries; Pine decides its own.', experiment);
+    }
+    try {
+      await holdEntries(hold, reason);
+    } catch (error) {
+      throw new PaperExperimentControllerError('PAPER_CLOSE_FAILED',
+        error instanceof Error ? error.message : 'The engine did not accept the entry hold.', experiment);
+    }
+    return experiment;
   }
 
   async close(): Promise<void> {

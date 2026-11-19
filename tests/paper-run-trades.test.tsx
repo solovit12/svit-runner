@@ -12,11 +12,14 @@ const panel: PaperStrategyPanel = {
 
 const trades: PaperExperimentTrades = { coverage: 'durable_journal', truncated: false, groups: [{
   id: 'g1', name: 'BRENTOIL/WTI', openedAt: '2026-11-12T08:08:48.100Z', closedAt: '2026-11-12T10:24:49.300Z',
-  realizedPnl: 1.86, fees: 0, legs: [
+  realizedPnl: 1.86, fees: 0,
+  openReason: 'r -8.3 bp from its 15-min mean', closeReason: 'take-profit, r came back +12.0 bp', legs: [
     { venue: 'Lighter', market: 'BRENTOIL', side: 'long', openedAt: '2026-11-12T08:08:48.100Z', closedAt: '2026-11-12T10:24:49.200Z',
-      quantity: 21.8674, entryPrice: 91.46, exitPrice: 90.32, entryValue: 1999.99, realizedPnl: -24.93, fees: 0, fills: 3 },
+      quantity: 21.8674, entryPrice: 91.46, exitPrice: 90.32, entryValue: 1999.99, realizedPnl: -24.93, fees: 0, fills: 3,
+      openReason: 'r -8.3 bp from its 15-min mean', closeReason: 'take-profit, r came back +12.0 bp' },
     { venue: 'Lighter', market: 'WTI', side: 'short', openedAt: '2026-11-12T08:08:48.200Z', closedAt: '2026-11-12T10:24:49.300Z',
-      quantity: 23.221, entryPrice: 86.1265, exitPrice: 84.973, entryValue: 1999.94, realizedPnl: 26.79, fees: 0, fills: 3 },
+      quantity: 23.221, entryPrice: 86.1265, exitPrice: 84.973, entryValue: 1999.94, realizedPnl: 26.79, fees: 0, fills: 3,
+      openReason: 'r -8.3 bp from its 15-min mean', closeReason: 'take-profit, r came back +12.0 bp' },
   ] }] };
 
 describe('run page: strategy panels and trades by position', () => {
@@ -54,5 +57,23 @@ describe('run page: strategy panels and trades by position', () => {
     expect(html).toContain('<td class="paper-pnl-up">+26.79 USDC</td>');
     expect(html.indexOf('paper-side-long">BRENTOIL')).toBeLessThan(html.indexOf('paper-side-short">WTI'));
     expect(html.indexOf('paper-side-long">BRENTOIL')).toBeGreaterThan(0);
+  });
+
+  it('says why the position was opened and what closed it', () => {
+    const html = renderToStaticMarkup(createElement(PaperTradeGroups, { trades, live: true, nowMs: Date.parse('2026-11-12T11:00:00Z') }));
+    expect(html).toContain('entry reason: <b>r -8.3 bp from its 15-min mean</b>');
+    expect(html).toContain('exit reason: <b>take-profit, r came back +12.0 bp</b>');
+  });
+
+  it('names each leg when they did not end the same way, and stays quiet without reasons', () => {
+    const [group] = trades.groups;
+    const mixed = { ...trades, groups: [{ ...group!, closeReason: null, legs: [
+      group!.legs[0]!, { ...group!.legs[1]!, closeReason: 'the run stopped' }] }] };
+    const html = renderToStaticMarkup(createElement(PaperTradeGroups, { trades: mixed, live: true, nowMs: 0 }));
+    expect(html).toContain('exit reason: <b>BRENTOIL: take-profit, r came back +12.0 bp · WTI: the run stopped</b>');
+    const older = { ...trades, groups: [{ ...group!, openReason: null, closeReason: null,
+      legs: group!.legs.map((leg) => ({ ...leg, openReason: null, closeReason: null })) }] };
+    expect(renderToStaticMarkup(createElement(PaperTradeGroups, { trades: older, live: true, nowMs: 0 })))
+      .not.toContain('reason: <b>');   // only the tooltip mentions reasons
   });
 });

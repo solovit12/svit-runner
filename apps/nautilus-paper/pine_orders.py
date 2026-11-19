@@ -30,6 +30,12 @@ ZERO = Decimal("0")
 
 ORDER_TYPES = ("market", "limit", "stop", "stop-limit")
 
+#: Longest "why" text kept with an order and written next to its fills.
+MAX_REASON = 120
+#: Why an exit executed, when the strategy named no reason of its own: the leg that fired.
+EXIT_REASONS = {"profit": "take-profit order", "loss": "stop-loss order",
+                "stop": "stop-loss order", "trail": "trailing stop", "limit": "limit exit"}
+
 
 def dec(value, label):
     if value is None:
@@ -103,6 +109,9 @@ class ExecRequest:
     source_ns: int = 0
     created_ms: int = 0
     waited: bool = False
+    # Why this order is sent, written next to the fills it makes (the strategy's own
+    # text, else the exit leg that executed). None: the engine names the cause.
+    why: str | None = None
 
 
 class PineOrderManager:
@@ -214,9 +223,12 @@ class PineOrderManager:
             raise ValueError(f"order {order_id}: invalid side")
         if category == "entry" and side is None:
             raise ValueError(f"entry {order_id} needs a side")
+        reason = raw.get("reason")
+        if reason is not None and (not isinstance(reason, str) or len(reason) > MAX_REASON):
+            raise ValueError(f"order {order_id}: reason must be a string of at most {MAX_REASON} characters")
         order = {"id": order_id, "category": category, "type": kind, "side": side,
                  "tradeKeys": list(raw.get("tradeKeys") or []), "plan": raw.get("plan"),
-                 "oca": raw.get("oca"), "fromEntry": raw.get("fromEntry"),
+                 "oca": raw.get("oca"), "fromEntry": raw.get("fromEntry"), "reason": reason or None,
                  "profitType": raw.get("profitType") or "limit", "tif": raw.get("tif") or "gtc"}
         for name in ("limit", "stop", "profitTicks", "lossTicks", "trailPrice", "trailPointsTicks",
                      "trailOffsetTicks", "qtyCap", "qtyPercent", "sizeScale", "notionalUsdc", "profitPercent",
@@ -471,12 +483,13 @@ class PineOrderManager:
         self.request_seq += 1
         reference = self.ask if side == "buy" else self.bid
         ioc = order.get("tif") == "ioc"
+        why = order.get("reason") or (EXIT_REASONS.get(leg.trigger_kind) if order["category"] == "exit" else None)
         request = ExecRequest(f"{self.track}:{self.request_seq}", leg.key, order["category"], side, limit,
                               real_close, open_side, reduce_only=order["category"] == "exit" and open_side is None,
                               reference_price=reference, size_scale=order.get("sizeScale") or Decimal(1),
                               notional=order.get("notionalUsdc"),
                               ioc=ioc, source_ns=leg.source_ns if (ioc or leg.state == "triggered") else 0,
-                              created_ms=now_ms)
+                              created_ms=now_ms, why=why)
         leg.state, leg.request_id = "executing", request.id
         leg.closes_snapshot = closes
         self.requests.append(request)
@@ -664,7 +677,8 @@ class PineOrderManager:
             leg.closes_snapshot = []
             self.legs[leg.key] = leg
             self.requests.append(ExecRequest(leg.request_id, leg.key, "exit", "sell" if side == "long" else "buy",
-                                             None, qty, None, reduce_only=True))
+                                             None, qty, None, reduce_only=True,
+                                             why="cleanup: position owned by no trade"))
 
     # ----- inspection -------------------------------------------------------
 

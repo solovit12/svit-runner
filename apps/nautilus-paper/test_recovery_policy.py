@@ -127,5 +127,70 @@ class RecoveryPolicyTests(unittest.TestCase):
         self.assertNotIn('hourly_candles_not_ready', blockers)
 
 
+class OtherVenuesAtTheGapTests(unittest.TestCase):
+    """A gap on one exchange records what the others were doing in the same second.
+
+    2026-11-14: Hyperliquid alone was silent for 90 s (HTTP 502 from its API) while Lighter kept
+    delivering. Without this line the journal does not say whose side a silence is on.
+    """
+
+    def controller(self, tracks=None):
+        events = []
+        emitter = SimpleNamespace(on_failure=None, sync=lambda: None,
+                                  emit=lambda kind, **fields: events.append({'type': kind, **fields}))
+        config = {'mode': 'public', 'volatilityExpiresAtMs': 10 ** 15, 'nativeStrategy': PINE_STRATEGY,
+                  **({'tracks': tracks} if tracks else {})}
+        controller = RuntimeController(config, emitter)
+        controller.snapshot = Mock()
+        controller.flush_diagnostics = Mock()
+        for key in controller.specs:
+            controller.strategies[key] = SimpleNamespace(pause_for_recovery=Mock(), invalidate_inputs=Mock())
+        return controller, events
+
+    def messages(self, events):
+        return [event['message'] for event in events if event['type'] == 'event']
+
+    def test_another_exchange_still_delivering_points_at_the_silent_one(self):
+        controller, events = self.controller()
+        now = time.time_ns() // 1_000_000
+        controller.last_public_ms['lighter'] = now - 300
+        controller.last_public_ms['hyperliquid'] = now - 90_000
+        controller.begin_recovery('hyperliquid')
+        line = next(message for message in self.messages(events) if 'went silent' in message)
+        self.assertIn('Hyperliquid went silent; last public data elsewhere: Lighter ', line)
+        self.assertIn("this server's connection is working, so the silence is on its side", line)
+        self.assertNotIn('Hyperliquid ', line.split('elsewhere:')[1])  # only the other exchanges
+
+    def test_every_exchange_quiet_points_at_this_server(self):
+        controller, events = self.controller()
+        now = time.time_ns() // 1_000_000
+        controller.last_public_ms['lighter'] = now - 70_000
+        controller.last_public_ms['hyperliquid'] = now - 70_000
+        controller.begin_recovery('hyperliquid')
+        line = next(message for message in self.messages(events) if 'went silent' in message)
+        self.assertIn("this server's connection may be the cause", line)
+
+    def test_an_exchange_that_never_delivered_is_named_as_such(self):
+        controller, events = self.controller()
+        controller.last_public_ms['lighter'] = None
+        controller.begin_recovery('hyperliquid')
+        self.assertIn('Lighter nothing yet', next(m for m in self.messages(events) if 'went silent' in m))
+
+    def test_a_one_exchange_run_says_there_is_nothing_to_compare(self):
+        controller, events = self.controller([{'venue': 'lighter', 'market': 'XAU'}])
+        controller.begin_recovery('lighter:XAU')
+        line = next(message for message in self.messages(events) if 'went silent' in message)
+        self.assertIn('this run trades no other exchange, so there is nothing to compare it with', line)
+
+    def test_the_line_is_written_once_per_gap_not_per_market(self):
+        controller, events = self.controller([{'venue': 'hyperliquid', 'market': 'xyz:GOLD'},
+                                              {'venue': 'hyperliquid', 'market': 'xyz:SILVER'},
+                                              {'venue': 'lighter', 'market': 'XAU'}])
+        controller.last_public_ms['lighter:XAU'] = time.time_ns() // 1_000_000
+        controller.begin_recovery('hyperliquid:xyz:GOLD')
+        controller.begin_recovery('hyperliquid:xyz:SILVER')
+        self.assertEqual(len([m for m in self.messages(events) if 'went silent' in m]), 1)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

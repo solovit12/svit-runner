@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PaperPositionsTable, PaperRunActivity, PaperRunDataGaps, PaperRunHealth, PaperRunRules, PaperRunHistory, PaperRunTrackTable, PaperRuns, StopRunDialog, DeleteRunDialog, runListOrder } from '../apps/web/src/components/PaperRuns';
+import { canClosePositions, ClosePositionsDialog, entriesHeld, openPositionCount, RunPageActions, PaperPositionsTable, PaperRunActivity, PaperRunDataGaps, PaperRunHealth, PaperRunRules, PaperRunHistory, PaperRunTrackTable, PaperRuns, StopRunDialog, DeleteRunDialog, runListOrder } from '../apps/web/src/components/PaperRuns';
 import type { PaperExperimentActivity, PaperExperimentSummary, PaperExperimentDetail } from '../packages/shared/src/paper-experiment-contracts';
 
 const sample: PaperExperimentSummary = {
@@ -23,6 +23,34 @@ describe('Paper run history', () => {
     }));
     expect(html).toContain('<strong>Running · data gap</strong>');
     expect(html).not.toContain('Interrupted');
+  });
+
+  it('gives every run a real link, so it can be opened in a separate browser tab', () => {
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, {
+      experiments: [sample, { ...sample, id: 'run 2', live: true }], onOpen: () => undefined,
+    }));
+    expect(html).toContain('href="/runs/run-1"');
+    expect(html).toContain('href="/runs/run%202"');
+    expect(html).toContain('opens it in a new browser tab');
+  });
+
+  it('shows how long each open pair may still be held before it closes at its mean', () => {
+    const inHours = (ms: number) => new Date(Date.now() + ms).toISOString();
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, {
+      experiments: [{ ...sample, status: 'running', endedAt: null, meanExits: [
+        { label: 'CRWV/NBIS', at: inHours(2 * 3_600_000 + 14 * 60_000 + 2_000) },
+        { label: 'xyz:CRWV/xyz:NBIS', at: inHours(-60_000) },
+      ] }],
+      onOpen: () => undefined,
+    }));
+    expect(html).toContain('Mean exit in');
+    expect(html).toContain('<span>CRWV/NBIS</span> 2h 14m');
+    expect(html).toContain('<span>xyz:CRWV/xyz:NBIS</span> waiting for the mean');
+  });
+
+  it('leaves the mean exit column empty for a run with nothing open', () => {
+    const html = renderToStaticMarkup(createElement(PaperRunHistory, { experiments: [sample], onOpen: () => undefined }));
+    expect(html).toContain('<td class="paper-history-countdown">\u2014</td>');
   });
 
   it('lists only the markets without fresh data and tags their open positions', () => {
@@ -99,8 +127,8 @@ describe('Paper run history', () => {
       onOpen: () => undefined, onStop: () => undefined,
     }));
     const headers = [...html.matchAll(/<th>([A-Za-z /]+)/g)].map((match) => match[1]!.trim());
-    expect(headers.slice(0, 8)).toEqual(['Strategy', 'Status', 'Total PnL', 'Closed positions', 'Win rate', 'Profit factor',
-      'Strategy parameters', 'Venues']);
+    expect(headers.slice(0, 9)).toEqual(['Strategy', 'Status', 'Total PnL', 'Mean exit in', 'Closed positions', 'Win rate',
+      'Profit factor', 'Strategy parameters', 'Venues']);
     expect(headers.at(-1)).toBe('Actions');
     expect(html).toContain('<span>pairs = BRENTOIL/WTI, XAU/XAG</span><span>ema_minutes = 30</span><span>windows = cme_closed</span>');
     const [first, second] = html.split('<tbody>')[1]!.split('</tr>');
@@ -185,6 +213,91 @@ describe('Paper run history', () => {
     expect(live).toContain('Stop this LIVE run?');
     expect(live).toContain('closed at market on Lighter and Hyperliquid');
     expect(live).toContain('Stopping…');
+  });
+
+  it('asks "are you sure" before closing positions and promises the run keeps trading', () => {
+    const run = { id: 'run-a', strategyName: 'Pair reversion', live: true, exchanges: 'Lighter' };
+    const html = renderToStaticMarkup(createElement(ClosePositionsDialog, {
+      run, positions: 2, busy: false, onCancel: () => undefined, onConfirm: () => undefined }));
+    expect(html).toContain('Close every position now?');
+    expect(html).toContain('holds 2 open positions');
+    expect(html).toContain('on Lighter');
+    expect(html).toContain('closed at market on the exchange right away');
+    expect(html).toContain('is <strong>not</strong> stopped');
+    expect(html).toContain('>Yes, close positions</button>');
+    const empty = renderToStaticMarkup(createElement(ClosePositionsDialog, {
+      run: { ...run, live: false }, positions: 0, busy: true, onCancel: () => undefined, onConfirm: () => undefined }));
+    expect(empty).toContain('No position is open right now');
+    expect(empty).toContain('Closing…');
+  });
+
+  it('puts Close positions beside Stop on the run page, and only where it works', () => {
+    const detail = { id: 'run-1', strategyName: 'Pair reversion Live', status: 'running',
+      accountModel: 'python_live_v1', live: { maxLeverage: 20 } } as unknown as PaperExperimentDetail;
+    const html = renderToStaticMarkup(createElement(RunPageActions, {
+      detail, closeBusyId: null, stopBusyId: null, onClose: () => undefined, onStop: () => undefined }));
+    expect(html).toContain('aria-label="Close the open positions of run run-1"');
+    expect(html).not.toContain('Close and hold');     // no hold handler: no hold button
+    expect(html).toContain('>Close positions</button>');
+    expect(html).toContain('>Stop and close all</button>');
+    expect(html.indexOf('Close positions')).toBeLessThan(html.indexOf('Stop and close all'));
+    // While one is running neither can be pressed again.
+    const busy = renderToStaticMarkup(createElement(RunPageActions, {
+      detail, closeBusyId: 'run-1', stopBusyId: null, onClose: () => undefined, onStop: () => undefined }));
+    expect(busy).toContain('>Closing…</button>');
+    expect(busy).toContain('disabled=""');
+    // A Pine run keeps Stop alone.
+    const pine = renderToStaticMarkup(createElement(RunPageActions, {
+      detail: { ...detail, accountModel: 'pine_live_v1' } as PaperExperimentDetail,
+      closeBusyId: null, stopBusyId: null, onClose: () => undefined, onStop: () => undefined }));
+    expect(pine).not.toContain('Close positions');
+    expect(pine).toContain('>Stop and close all</button>');
+    // A finished run has neither.
+    const done = renderToStaticMarkup(createElement(RunPageActions, {
+      detail: { ...detail, status: 'interrupted' } as PaperExperimentDetail,
+      closeBusyId: null, stopBusyId: null, onClose: () => undefined, onStop: () => undefined }));
+    expect(done).toBe('');
+  });
+
+  it('offers Close and hold, then only Resume entries while the hold is on', () => {
+    const detail = { id: 'run-1', strategyName: 'Pair reversion Live', status: 'running',
+      accountModel: 'python_live_v1', live: { maxLeverage: 20 } } as unknown as PaperExperimentDetail;
+    const props = { closeBusyId: null, stopBusyId: null, holdBusyId: null, onClose: () => undefined,
+      onCloseAndHold: () => undefined, onResume: () => undefined, onStop: () => undefined };
+    const open = renderToStaticMarkup(createElement(RunPageActions, { ...props, detail }));
+    expect(open).toContain('>Close positions</button>');
+    expect(open).toContain('>Close and hold</button>');
+    expect(open).not.toContain('Resume entries');
+    const onHold = { ...detail, runtime: { entriesHeld: true } } as unknown as PaperExperimentDetail;
+    const held = renderToStaticMarkup(createElement(RunPageActions, { ...props, detail: onHold }));
+    expect(held).toContain('>Resume entries</button>');
+    expect(held).toContain('aria-label="Allow new entries of run run-1 again"');
+    expect(held).not.toContain('>Close positions</button>');   // nothing can be open while held
+    expect(held).toContain('>Stop and close all</button>');    // Stop is always there
+    expect(entriesHeld(onHold)).toBe(true);
+    expect(entriesHeld(detail)).toBe(false);
+    // The hold dialog says plainly that nothing new opens until Resume.
+    const dialog = renderToStaticMarkup(createElement(ClosePositionsDialog, {
+      run: { id: 'run-1', strategyName: 'Pair reversion Live', live: true, exchanges: 'Lighter' },
+      positions: 1, busy: false, hold: true, onCancel: () => undefined, onConfirm: () => undefined }));
+    expect(dialog).toContain('Close everything and hold new entries?');
+    expect(dialog).toContain('<strong>nothing new</strong>');
+    expect(dialog).toContain('<strong>Resume entries</strong>');
+    expect(dialog).toContain('>Yes, close and hold</button>');
+  });
+
+  it('offers Close positions only for a running Python strategy, and counts what is open', () => {
+    const python = { status: 'running', accountModel: 'python_live_v1' } as const;
+    expect(canClosePositions(python)).toBe(true);
+    expect(canClosePositions({ ...python, status: 'stopping' })).toBe(false);
+    expect(canClosePositions({ ...python, status: 'interrupted' })).toBe(false);
+    // Pine keeps its own trade list: a close behind its back would be opened again.
+    expect(canClosePositions({ status: 'running', accountModel: 'pine_live_v1' })).toBe(false);
+    expect(canClosePositions({ status: 'running', accountModel: 'venue_shared_v2' })).toBe(false);
+    expect(openPositionCount({ runtime: undefined })).toBe(0);
+    expect(openPositionCount({ runtime: { accounts: [
+      { positions: [{ market: 'BRENTOIL' }, { market: 'WTI' }] }, { positions: [] },
+    ] } } as never)).toBe(2);
   });
 
   it('offers Run Duplicate for active and finished runs alike', () => {

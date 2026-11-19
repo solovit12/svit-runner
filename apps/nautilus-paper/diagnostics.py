@@ -6,7 +6,7 @@ market observation. An open interval can therefore contribute duration to the
 next batch after its opening episode was reported in an earlier batch.
 
 Every fixed scope/reason combination is supported. A normal flush produces a
-small number of messages; the exhaustive vocabulary is bounded to 64 parts per
+small number of messages; the exhaustive vocabulary is bounded to MAX_PARTS_PER_BATCH parts per
 batch (128 per force-flush if it also completes a previously failed batch).
 One latest age sample is retained per row. Wait samples describe the latest
 blocking observation, including when the interval closes after a flush.
@@ -26,7 +26,6 @@ import time
 PREFIX = "Paper diagnostic: "
 FLUSH_INTERVAL_NS = 30_000_000_000
 MAX_MESSAGE_CHARS = 2048
-MAX_PARTS_PER_BATCH = 64
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 SCOPES = frozenset({"bridge_quote", "bridge_book", "quote", "book", "entry", "exit"})
@@ -43,6 +42,10 @@ SKIP_REASONS = frozenset({
     "venue_missing", "venue_delivery_stale", "venue_source_stale", "venue_delivery_future",
     "venue_source_future", "track_quiet", "superseded_by_book", "entry_wait_expired",
     "price_left_limit", "no_liquidity_at_limit",
+    # LIVE refusals of an entry (runtime.DIAGNOSTIC_REASON) and the owner's hold on new entries.
+    # Every name a gate can return must be here: an unknown one raises and would stop the run.
+    "live_rate_limited", "live_leverage_cap", "live_position_cap", "live_exchange_rejected",
+    "exchange_halted", "entries_on_hold",
 })
 WAIT_REASONS = (SKIP_REASONS - {
     "source_before_reconnect", "initialized_before_reconnect", "source_out_of_order",
@@ -53,6 +56,10 @@ AGE_KEYS = frozenset({
     "eventSourceMs", "eventInitMs", "venueDeliveryMs", "venueSourceMs",
 })
 MAX_KEYS = len(SCOPES) * len(SKIP_REASONS) + len(WAIT_REASONS)
+# One flush carries the whole fixed vocabulary without trimming, so this bound follows the
+# vocabulary instead of a number that quietly stops fitting when a reason is added (2026-11-17).
+# A row costs well under 500 characters; the eight extra parts are the margin.
+MAX_PARTS_PER_BATCH = math.ceil(MAX_KEYS * 500 / MAX_MESSAGE_CHARS) + 8
 
 
 def _reasons(values, allowed):

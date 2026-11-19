@@ -24,7 +24,7 @@ class FirstBarLong(Strategy):
             ctx.state["warm"] = ctx.state.get("warm", 0) + 1
             return
         if ctx.position == 0 and not ctx.state.get("done"):
-            ctx.entry("L", "long")
+            ctx.entry("L", "long", reason="first live bar")
             ctx.exit("XL", "L", profit_ticks=ctx.params["tp"], loss_ticks=500)
 
     def on_fill(self, ctx, fill):
@@ -81,6 +81,30 @@ def bars(count, end_ms):
              "open": 100, "high": 100.1, "low": 99.9, "close": 100, "volume": 1} for i in range(count)]
 
 
+CLOSE_PACK = """
+from psr_sdk import Strategy
+
+
+class TwiceLong(Strategy):
+    name = "Twice long"
+    timeframe = "1m"
+    warmup_bars = 0
+
+    def on_quote(self, ctx, quote):
+        entries = ctx.state.get("entries", 0)
+        if ctx.position == 0 and not ctx.orders and entries < 2:
+            ctx.entry(f"L{entries}", "long", usdc=500, reason="test entry")
+
+    def on_close_request(self, ctx, reason):
+        ctx.log(f"strategy was asked to close: {reason}")
+        super().on_close_request(ctx, reason)
+
+    def on_fill(self, ctx, fill):
+        if fill.category == "entry":
+            ctx.state["entries"] = ctx.state.get("entries", 0) + 1
+        ctx.log(f"strategy saw {fill.category} {fill.qty} @ {fill.price}")
+"""
+
 async def scenario():
     with tempfile.TemporaryDirectory(prefix="psr-nautilus-sdk-") as tmp:
         folder = Path(tmp)
@@ -101,12 +125,14 @@ async def scenario():
             await run.wait(lambda: run.fills("entry"), "real entry")
             [entry] = run.fills("entry")
             assert Decimal(entry["quantity"]) == Decimal("9.990") and Decimal(entry["price"]) == Decimal("100.10"), entry
+            assert entry["reason"] == "first live bar", entry          # the strategy's own words
             await run.wait(lambda: run.messages("strategy saw entry long 9.99 @ 100.1"), "on_fill callback")
             await asyncio.sleep(0.2)
             await run.prices(("101.20", "101.30"))  # TP 100.10 + 100 ticks = 101.10
             await run.wait(lambda: run.fills("exit"), "take-profit")
             [exit_fill] = run.fills("exit")
             assert Decimal(exit_fill["price"]) == Decimal("101.20"), exit_fill
+            assert exit_fill["reason"] == "take-profit order", exit_fill   # no words: the leg that fired
             await run.wait(lambda: run.messages("strategy saw exit long"), "exit callback")
             snapshot = await run.snapshot()
             lighter = next(a for a in snapshot["accounts"] if a["venue"] == "Lighter")
@@ -203,7 +229,109 @@ async def trades_scenario():
         print("sdk trades PASS", flush=True)
 
 
+async def hold_entries_scenario():
+    """"Close and hold": everything closes, nothing new opens until the owner allows it again."""
+    with tempfile.TemporaryDirectory(prefix="psr-nautilus-hold-") as tmp:
+        folder = Path(tmp)
+        pack = folder / "hold_pack"
+        pack.mkdir()
+        (pack / "twice.py").write_text(CLOSE_PACK)
+        run = PineRun(folder, "sdk-hold", [("lighter", "SOL")])
+        run.config = {**pine_config(folder, "sdk-hold", [("lighter", "SOL")]), "nativeStrategy": "python_strategy_v1",
+                      "strategy": {"ref": "hold_pack/twice:TwiceLong", "packPaths": [str(pack)], "params": {}}}
+        try:
+            await run.start()
+            now = time.time_ns() // 1_000_000
+            await run.send({"cmd": "bars", "venue": "lighter", "market": "SOL", "bars": bars(2, now - 1000)})
+            await run.wait(lambda: run.messages("warmed up on 2 bars"), "warm-up")
+            await run.prices(("99.90", "100.00"))
+            await run.wait(lambda: run.fills("entry"), "entry")
+
+            # The owner presses "Close and hold": the hold goes first, then the close.
+            await run.send({"cmd": "hold_entries", "hold": True, "reason": "the owner pressed Close and hold"})
+            await run.send({"cmd": "close_positions", "reason": "the owner pressed Close and hold"})
+            await run.wait(lambda: run.messages("new entries are on hold"), "the hold is on")
+            await run.prices(("99.95", "100.05"))
+            await run.wait(lambda: run.fills("exit"), "closed at market")
+
+            # The strategy wants to enter again (its rule allows a second entry) and cannot.
+            for price in (("99.80", "99.90"), ("99.70", "99.80"), ("99.60", "99.70")):
+                await run.prices(price)
+                await asyncio.sleep(0.2)
+            assert len(run.fills("entry")) == 1, run.fills("entry")
+            snapshot = await run.snapshot()
+            assert snapshot["stage"] == "running" and snapshot.get("entriesHeld") is True, snapshot
+            lighter = next(a for a in snapshot["accounts"] if a["venue"] == "Lighter")
+            assert not lighter["positions"], lighter
+
+            # Allowed again: the next price opens a position.
+            await run.send({"cmd": "hold_entries", "hold": False, "reason": "the owner pressed Resume entries"})
+            await run.wait(lambda: run.messages("new entries are allowed again"), "the hold is off")
+            await run.prices(("99.50", "99.60"))
+            await run.wait(lambda: len(run.fills("entry")) == 2, "the entry after the hold")
+            held = await run.snapshot()
+            assert "entriesHeld" not in held, held
+            assert not run.failures(), run.failures()
+        except Exception:
+            print((folder / "stderr.log").read_text(errors="replace")[-8000:], file=sys.stderr)
+            print(json.dumps(run.events[-25:], indent=2), file=sys.stderr)
+            raise
+        finally:
+            await run.close()
+        print("sdk hold entries PASS fills", len(run.fills()), flush=True)
+
+
+async def close_positions_scenario():
+    """The owner's "Close positions": the position is closed at market and the run goes on trading."""
+    with tempfile.TemporaryDirectory(prefix="psr-nautilus-close-") as tmp:
+        folder = Path(tmp)
+        pack = folder / "close_pack"
+        pack.mkdir()
+        (pack / "twice.py").write_text(CLOSE_PACK)
+        run = PineRun(folder, "sdk-close", [("lighter", "SOL")])
+        run.config = {**pine_config(folder, "sdk-close", [("lighter", "SOL")]), "nativeStrategy": "python_strategy_v1",
+                      "strategy": {"ref": "close_pack/twice:TwiceLong", "packPaths": [str(pack)], "params": {}}}
+        try:
+            await run.start()
+            now = time.time_ns() // 1_000_000
+            await run.send({"cmd": "bars", "venue": "lighter", "market": "SOL", "bars": bars(2, now - 1000)})
+            await run.wait(lambda: run.messages("warmed up on 2 bars"), "warm-up")
+            await run.prices(("99.90", "100.00"))
+            await run.wait(lambda: run.fills("entry"), "entry")
+
+            # The owner presses the button: the API sends this one line to the engine.
+            await run.send({"cmd": "close_positions", "reason": "the owner pressed Close positions"})
+            await run.wait(lambda: run.messages("strategy was asked to close"), "the strategy was asked")
+            # The close leaves with the next price, like every other market order of the engine
+            # (in Live the next price is milliseconds away).
+            await run.prices(("99.95", "100.05"))
+            await run.wait(lambda: run.fills("exit"), "closed at market")
+            [closed] = run.fills("exit")
+            assert closed["reason"] == "the owner pressed Close positions", closed
+            assert run.messages("closing what is open on SOL at market"), run.events[-8:]
+
+            # The run is untouched: still running, flat, and its slot and account are its own.
+            snapshot = await run.snapshot()
+            assert snapshot["stage"] == "running", snapshot["stage"]
+            lighter = next(a for a in snapshot["accounts"] if a["venue"] == "Lighter")
+            assert not lighter["positions"], lighter
+
+            # ... and it takes its next entry when its own rule says so.
+            await run.prices(("99.80", "99.90"))
+            await run.wait(lambda: len(run.fills("entry")) == 2, "the next entry after the close")
+            assert not run.failures(), run.failures()
+        except Exception:
+            print((folder / "stderr.log").read_text(errors="replace")[-8000:], file=sys.stderr)
+            print(json.dumps(run.events[-25:], indent=2), file=sys.stderr)
+            raise
+        finally:
+            await run.close()
+        print("sdk close positions PASS fills", len(run.fills()), flush=True)
+
+
 if __name__ == "__main__":
     asyncio.run(scenario())
     asyncio.run(ioc_scenario())
     asyncio.run(trades_scenario())
+    asyncio.run(close_positions_scenario())
+    asyncio.run(hold_entries_scenario())

@@ -234,6 +234,19 @@ export interface PaperExperimentSummary {
   readonly pnl?: readonly VenuePnl[];
   /** Closed positions of the run (the runs list); absent when the run has no fill journal. */
   readonly trades?: PaperRunTradeStats;
+  /** Open pairs and when each of them closes at its mean (the runs list); absent for a run without the rule or with nothing open. */
+  readonly meanExits?: readonly PaperRunMeanExit[];
+}
+
+/**
+ * One open pair (or a lone market) of a pair strategy and the moment its "close at the mean" rule
+ * switches on: `mean_after_hours` after the position opened. A moment in the past means the strategy
+ * is already waiting for the ratio to touch its mean, and closes the pair as soon as it does.
+ */
+export interface PaperRunMeanExit {
+  /** "CRWV/NBIS" for a pair, the market itself when the `pairs` parameter does not name it. */
+  readonly label: string;
+  readonly at: string;
 }
 
 /**
@@ -274,6 +287,11 @@ export interface PaperExperimentDetail extends PaperExperimentSummary {
 
 export interface PaperExperimentRuntimeView {
   readonly stage: 'warming_up' | 'waiting_for_data' | 'running' | 'recovering' | 'stopping';
+  /**
+   * The owner holds new entries ("Close and hold" on the run page): the run watches prices and
+   * manages what is open, but opens nothing new until they allow entries again.
+   */
+  readonly entriesHeld?: boolean;
   /** Present only when the current owner attests the Nautilus Sandbox engine. Older snapshots omit it. */
   readonly engine?: 'nautilus';
   readonly fundingTreatment: 'excluded';
@@ -383,6 +401,12 @@ export interface PaperExperimentActivityFill {
   readonly fee: string | null;
   /** Reserved until a complete net-PnL attribution is available. */
   readonly realizedPnl: string | null;
+  /**
+   * Why this execution happened: the strategy's own words for the order ("take-profit, r came back
+   * +12.0 bp"), else what the engine did (an exchange-side stop, the run stopping, a data gap).
+   * Null for runs made before reasons were recorded, and for strategies that name none.
+   */
+  readonly reason: string | null;
 }
 
 export interface PaperExperimentActivity {
@@ -414,6 +438,10 @@ export interface PaperTradeLeg {
   readonly realizedPnl: number | null;
   readonly fees: number;
   readonly fills: number;
+  /** Why it was opened, from the first entry fill that names a reason; null when none does. */
+  readonly openReason: string | null;
+  /** Why it was closed, from the last exit fill that names a reason; null while open or when none does. */
+  readonly closeReason: string | null;
 }
 
 /** Legs opened together (both legs of a pair; a single market otherwise), newest first in the list. */
@@ -426,6 +454,10 @@ export interface PaperTradeGroup {
   readonly closedAt: string | null;
   readonly realizedPnl: number | null;
   readonly fees: number;
+  /** Why the legs were opened, when every leg names the same reason; null otherwise. */
+  readonly openReason: string | null;
+  /** Why the legs were closed, when every leg names the same reason; null otherwise. */
+  readonly closeReason: string | null;
   readonly legs: readonly PaperTradeLeg[];
 }
 

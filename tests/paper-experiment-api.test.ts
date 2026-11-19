@@ -361,6 +361,106 @@ describe('Paper experiment control API', () => {
     } finally { await reopened.close(); }
   });
 
+  it('closes the positions of a running run at market and leaves the run trading', async () => {
+    const root = await tempRoot();
+    let report!: Parameters<PaperExperimentRuntimeFactory['start']>[1];
+    const closePositions = vi.fn(async () => undefined);
+    const factory: PaperExperimentRuntimeFactory = {
+      preflight: async () => undefined,
+      abortStart: async () => interruptedStopProof,
+      start: async (_snapshot, notify) => { report ??= notify; return { stop: async () => interruptedStopProof, closePositions }; },
+    };
+    const app = await buildApp({ strategyCatalogDir: path.join(root, 'catalog'), paperExperimentsDir: path.join(root, 'paper'), paperRuntimeFactory: factory });
+    try {
+      const strategyId = await saveStrategy(app);
+      const started = await app.inject({ method: 'POST', url: '/api/paper-experiments', payload: launch(strategyId) });
+      const experiment = started.json().experiment;
+      // Only a running run: while it is still warming up there is nothing to close.
+      const early = await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/close-positions` });
+      expect(early.statusCode).toBe(409);
+      expect(early.json().kind).toBe('PAPER_CLOSE_UNSUPPORTED');
+      expect(closePositions).not.toHaveBeenCalled();
+
+      report(experiment.tracks[0].trackId, { status: 'running' });
+      const closed = await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/close-positions` });
+      expect(closed.statusCode, closed.body).toBe(200);
+      expect(closed.json().experiment.status).toBe('running');     // not a stop: the run goes on
+      expect(closePositions).toHaveBeenCalledTimes(1);
+      expect(closePositions.mock.calls[0][0]).toContain('Close positions');
+
+      // A cross-origin press is refused like every other Paper change.
+      const foreign = await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/close-positions`,
+        headers: { origin: 'https://other.example' } });
+      expect(foreign.statusCode).toBe(403);
+      const missing = await app.inject({ method: 'POST', url: `/api/paper-experiments/${randomUUID()}/close-positions` });
+      expect(missing.statusCode).toBe(404);
+      expect(closePositions).toHaveBeenCalledTimes(1);
+    } finally { await app.close(); }
+  });
+
+  it('holds and allows new entries without stopping the run', async () => {
+    const root = await tempRoot();
+    let report!: Parameters<PaperExperimentRuntimeFactory['start']>[1];
+    const closePositions = vi.fn(async () => undefined);
+    const holdEntries = vi.fn(async () => undefined);
+    const factory: PaperExperimentRuntimeFactory = {
+      preflight: async () => undefined,
+      abortStart: async () => interruptedStopProof,
+      start: async (_snapshot, notify) => { report ??= notify; return { stop: async () => interruptedStopProof, closePositions, holdEntries }; },
+    };
+    const app = await buildApp({ strategyCatalogDir: path.join(root, 'catalog'), paperExperimentsDir: path.join(root, 'paper'), paperRuntimeFactory: factory });
+    try {
+      const strategyId = await saveStrategy(app);
+      const started = await app.inject({ method: 'POST', url: '/api/paper-experiments', payload: launch(strategyId) });
+      const experiment = started.json().experiment;
+      report(experiment.tracks[0].trackId, { status: 'running' });
+
+      // "Close and hold": one press, both things, and the run is still running.
+      const held = await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/close-positions`, payload: { hold: true } });
+      expect(held.statusCode, held.body).toBe(200);
+      expect(held.json().experiment.status).toBe('running');
+      expect(closePositions.mock.calls[0][1]).toBe(true);
+      expect(closePositions.mock.calls[0][0]).toContain('Close and hold');
+
+      // "Resume entries".
+      const resumed = await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/entries-hold`, payload: { hold: false } });
+      expect(resumed.statusCode, resumed.body).toBe(200);
+      expect(holdEntries).toHaveBeenCalledWith(false, expect.stringContaining('allowed'));
+      // Holding again without closing anything.
+      await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/entries-hold`, payload: { hold: true } });
+      expect(holdEntries).toHaveBeenLastCalledWith(true, expect.stringContaining('held'));
+      expect(closePositions).toHaveBeenCalledTimes(1);     // the hold alone closes nothing
+
+      const foreign = await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/entries-hold`,
+        headers: { origin: 'https://other.example' }, payload: { hold: true } });
+      expect(foreign.statusCode).toBe(403);
+      expect(holdEntries).toHaveBeenCalledTimes(2);
+    } finally { await app.close(); }
+  });
+
+  it('refuses Close positions when the engine cannot ask its strategy (a Pine run)', async () => {
+    const root = await tempRoot();
+    let report!: Parameters<PaperExperimentRuntimeFactory['start']>[1];
+    const factory: PaperExperimentRuntimeFactory = {
+      preflight: async () => undefined,
+      abortStart: async () => interruptedStopProof,
+      start: async (_snapshot, notify) => { report ??= notify; return { stop: async () => interruptedStopProof }; },
+    };
+    const app = await buildApp({ strategyCatalogDir: path.join(root, 'catalog'), paperExperimentsDir: path.join(root, 'paper'), paperRuntimeFactory: factory });
+    try {
+      const strategyId = await saveStrategy(app);
+      const started = await app.inject({ method: 'POST', url: '/api/paper-experiments', payload: launch(strategyId) });
+      const experiment = started.json().experiment;
+      report(experiment.tracks[0].trackId, { status: 'running' });
+      const refused = await app.inject({ method: 'POST', url: `/api/paper-experiments/${experiment.id}/close-positions` });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().kind).toBe('PAPER_CLOSE_UNSUPPORTED');
+      expect(refused.json().error).toContain('Pine keeps its own trades');
+      const detail = await app.inject({ method: 'GET', url: `/api/paper-experiments/${experiment.id}` });
+      expect(detail.json().experiment.status).toBe('running');     // a refusal changes nothing
+    } finally { await app.close(); }
+  });
+
   it('stops runs for a server shutdown with that reason and starts them again on the next engine', async () => {
     const root = await tempRoot();
     const dirs = { strategyCatalogDir: path.join(root, 'catalog'), paperExperimentsDir: path.join(root, 'paper') };

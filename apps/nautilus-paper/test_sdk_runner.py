@@ -196,6 +196,33 @@ class RunnerTest(unittest.TestCase):
         self.runner.on_bar(bar(3, 94), at + H)
         self.assertIn("exit:close:L", self.runner.orders)
 
+    def test_close_request_closes_at_market_and_the_strategy_goes_on(self):
+        """The owner's "Close positions": the position goes at market, the runner keeps running."""
+        at = T0 + 3 * H
+        self.runner.on_bar(bar(2, 101), at)
+        self.runner.on_quote("100.9", "101.0", at + ARRIVAL_MS)
+        [request] = self.runner.manager.take_requests()
+        self.fill(request, "4", "101.0", at + 300)
+        self.assertEqual(self.runner.ctx.position, 4.0)
+        self.runner.close_request("the owner pressed Close positions", at + 400)
+        self.assertIn("exit:close:*", self.runner.orders)     # queued the moment the owner asked
+        self.runner.on_quote("100.9", "101.0", at + 400 + ARRIVAL_MS)
+        [close] = self.runner.manager.take_requests()
+        self.assertEqual((close.side, close.limit, close.close_qty), ("sell", None, Decimal("4")))
+        self.assertEqual((close.kind, close.why), ("exit", "the owner pressed Close positions"))
+        self.fill(close, "4", "100.9", at + 400 + ARRIVAL_MS + 10)
+        self.assertEqual(self.runner.ctx.position, 0.0)
+        self.assertTrue(self.runner.started)          # the run goes on
+        # ... and the same strategy enters again on its own rule, as after any other exit.
+        self.runner.on_bar(bar(4, 101), at + 2 * H)
+        self.runner.on_quote("100.9", "101.0", at + 2 * H + ARRIVAL_MS)
+        [again] = self.runner.manager.take_requests()
+        self.assertEqual((again.side, again.open_side), ("buy", "long"))
+
+    def test_close_request_without_a_position_sends_nothing(self):
+        self.runner.close_request("the owner pressed Close positions", T0 + 3 * H)
+        self.assertEqual(self.runner.manager.take_requests(), [])
+
     def test_entry_without_real_size_is_reported_as_rejected(self):
         at = T0 + 3 * H
         self.runner.on_bar(bar(2, 101), at)
@@ -276,6 +303,54 @@ class PackTest(unittest.TestCase):
             self.assertEqual((cls.name, len(digest)), ("Edge", 64))
             with self.assertRaisesRegex(ValueError, "not configured"):
                 load_strategy("other/secret:Edge", [str(pack)])
+
+
+class ReasonTest(unittest.TestCase):
+    """Why an order was placed travels with it, so every fill says what caused it."""
+
+    class Reasoned(Strategy):
+        timeframe = "1h"
+        warmup_bars = 0
+
+        def on_quote(self, ctx, quote):
+            if ctx.position == 0 and not ctx.orders:
+                ctx.entry("L", "long", reason="r -8.3 bp from its 15-min mean")
+                ctx.exit("XL", "L", profit_ticks=100, loss_ticks=50)
+            elif ctx.position > 0 and quote.bid >= 100.2:
+                ctx.close_all(reason="take-profit, r came back +12.0 bp")
+
+    def setUp(self):
+        self.runner = StrategyRunner(self.Reasoned, params={}, venue="lighter", market="SOL", mintick="0.01")
+        self.runner.start(T0)
+        self.at = T0 + 1000
+
+    def test_the_strategy_names_the_entry_and_the_close(self):
+        self.runner.on_quote("99.90", "100.00", self.at)
+        self.runner.evaluate(self.at + ARRIVAL_MS)
+        [entry] = self.runner.manager.take_requests()
+        self.assertEqual(entry.why, "r -8.3 bp from its 15-min mean")
+        self.runner.exec_result(entry.id, filled="2", average="100", opened="2", now_ms=self.at + ARRIVAL_MS)
+        # 100.20: neither the take-profit (101.00) nor the stop (99.50); the strategy closes by itself.
+        self.runner.on_quote("100.20", "100.30", self.at + 2000)
+        self.runner.evaluate(self.at + 2000 + ARRIVAL_MS)
+        [close] = self.runner.manager.take_requests()
+        self.assertEqual((close.kind, close.why), ("exit", "take-profit, r came back +12.0 bp"))
+
+    def test_an_exit_leg_without_a_reason_is_named_by_the_engine(self):
+        self.runner.on_quote("99.90", "100.00", self.at)
+        self.runner.evaluate(self.at + ARRIVAL_MS)
+        [entry] = self.runner.manager.take_requests()
+        self.runner.exec_result(entry.id, filled="2", average="100", opened="2", now_ms=self.at + ARRIVAL_MS)
+        self.runner.on_quote("101.00", "101.10", self.at + 2000)   # take-profit 100 + 100 ticks
+        self.runner.evaluate(self.at + 2000)
+        [profit] = self.runner.manager.take_requests()
+        self.assertEqual(profit.why, "take-profit order")
+
+    def test_a_reason_is_text_and_is_cut_to_its_limit(self):
+        self.runner.ctx.close(reason="x" * 500)
+        self.assertEqual(len(self.runner.orders["exit:close:*"]["reason"]), 120)
+        self.runner.ctx.close(reason="   ")
+        self.assertNotIn("reason", self.runner.orders["exit:close:*"])
 
 
 if __name__ == "__main__":

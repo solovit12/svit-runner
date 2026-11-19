@@ -32,6 +32,17 @@ def _text(value, limit):
     return text[:limit]
 
 
+MAX_REASON = 120
+
+
+def _reason(value):
+    """Why an order was placed, written next to its fills ("take-profit, r came back +12.0 bp")."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:MAX_REASON] or None
+
+
 def _finite(value, name):
     number = float(value)
     if number != number or number in (float("inf"), float("-inf")):
@@ -103,6 +114,16 @@ class Context:
         return self._runner.history
 
     @property
+    def entries_held(self):
+        """True while the owner holds new entries ("Close and hold" on the run page).
+
+        A strategy that decides entries itself should skip them while this is true and go on
+        managing what is open; the engine refuses an entry anyway, but a strategy that keeps its
+        own state is better off not deciding one at all.
+        """
+        return self._runner.entries_held
+
+    @property
     def bars(self):
         """Closed bars, oldest first (history and live)."""
         return self._runner.bars
@@ -146,7 +167,7 @@ class Context:
     # ----- orders (Pine semantics) ----------------------------------------
 
     def entry(self, order_id, side, *, limit=None, stop=None, size=1.0, usdc=None, oca=None, oca_type="cancel",
-              ioc=False):
+              ioc=False, reason=None):
         """Open (or reverse into) a position, like strategy.entry.
 
         Market when neither limit nor stop is given. `size` scales the Paper
@@ -158,6 +179,9 @@ class Context:
         `ioc=True` (limit only) sends an immediate-or-cancel limit: it arrives
         after the order latency, takes what the book holds at the limit, and the
         rest is canceled; with nothing filled `on_order_rejected` is called.
+
+        `reason`: short text of why this entry is placed; it is written next to
+        the fills it makes and shown on the run page (Trades by position).
         """
         if side not in ("long", "short"):
             raise ValueError("side must be 'long' or 'short'")
@@ -171,13 +195,14 @@ class Context:
             else "stop" if stop is not None else "market"
         self._runner.place({"id": self._id(order_id), "category": "entry", "type": kind, "side": side,
                             "limit": _num(limit), "stop": _num(stop), "sizeScale": float(size),
-                            "notionalUsdc": _num(usdc),
+                            "notionalUsdc": _num(usdc), "reason": _reason(reason),
                             "tif": "ioc" if ioc else None,
                             **({"oca": {"name": str(oca), "type": oca_type}} if oca else {})})
 
     def exit(self, order_id, from_entry=None, *, limit=None, stop=None, profit_ticks=None, loss_ticks=None,
              profit_percent=None, loss_percent=None, profit_type="limit",
-             trail_price=None, trail_points_ticks=None, trail_offset_ticks=None, qty_percent=None):
+             trail_price=None, trail_points_ticks=None, trail_offset_ticks=None, qty_percent=None,
+             reason=None):
         """Attach take-profit / stop-loss / trailing exits, like strategy.exit.
 
         Applies to every open trade of `from_entry` (all trades when None) and to
@@ -185,6 +210,9 @@ class Context:
         each trade's real entry price, attached at the moment it fills.
         `profit_type="market"` makes the take-profit a trigger (like the stop):
         reaching it sends a market order after the trigger delay.
+
+        `reason`: short text written next to the fills; left out, the engine
+        names the leg that executed (take-profit, stop-loss, trailing stop).
         """
         if all(value is None for value in (limit, stop, profit_ticks, loss_ticks, profit_percent, loss_percent,
                                            trail_price, trail_points_ticks)):
@@ -204,19 +232,26 @@ class Context:
                             "profitType": None if profit_type == "limit" else profit_type,
                             "trailPrice": _num(trail_price),
                             "trailPointsTicks": _num(trail_points_ticks), "trailOffsetTicks": _num(trail_offset_ticks),
-                            "qtyPercent": _num(qty_percent), "conditional": True})
+                            "qtyPercent": _num(qty_percent), "reason": _reason(reason),
+                            "conditional": True})
 
-    def close(self, entry_id=None, *, qty_percent=100):
-        """Close trades of `entry_id` (all trades when None) at market."""
+    def close(self, entry_id=None, *, qty_percent=100, reason=None):
+        """Close trades of `entry_id` (all trades when None) at market.
+
+        `reason`: short text of why they are closed ("take-profit, r came back
+        +12.0 bp"). It is written next to the closing fills and shown on the run
+        page, so every closed position says what ended it.
+        """
         if not 0 < float(qty_percent) <= 100:
             raise ValueError("qty_percent must be 0..100")
         name = f"close:{entry_id if entry_id is not None else '*'}"
         self._runner.place({"id": name, "category": "exit", "type": "market",
                             "fromEntry": None if entry_id is None else str(entry_id),
-                            "qtyPercent": float(qty_percent), "conditional": False})
+                            "qtyPercent": float(qty_percent), "reason": _reason(reason),
+                            "conditional": False})
 
-    def close_all(self):
-        self.close(None)
+    def close_all(self, reason=None):
+        self.close(None, reason=reason)
 
     def cancel(self, order_id):
         self._runner.cancel(str(order_id))
@@ -272,6 +307,7 @@ class StrategyRunner:
         self.rejected = 0
         self.instrument = None  # set by the runtime from the venue instrument
         self.panels = {}  # status key -> panel (ctx.status), sent with the account snapshot
+        self.entries_held = False  # the owner's hold on new entries, set by the runtime
 
     def set_status(self, key, panel):
         key = str(key).strip()[:80]
@@ -349,6 +385,18 @@ class StrategyRunner:
         self.now_ms = now_ms
         self._call("on_trade", Trade(float(price), float(size), now_ms))
         self.sync(now_ms)
+
+    def close_request(self, reason, now_ms):
+        """The owner asked for every position of this market to be closed at market now.
+
+        The strategy decides how (Strategy.on_close_request): the default closes the position,
+        a pair also clears its own state. The run keeps going either way.
+        """
+        if not self.started:
+            return
+        self.now_ms = now_ms
+        self._call("on_close_request", reason)
+        self.sync(now_ms, force=True)
 
     def evaluate(self, now_ms):
         self.now_ms = now_ms

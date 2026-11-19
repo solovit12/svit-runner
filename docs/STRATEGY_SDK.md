@@ -42,13 +42,43 @@ Callbacks (all optional): `on_start(ctx)`, `on_bar(ctx, bar)`, `on_quote(ctx, qu
 `uses_trades = True` — for example to measure volume; orders placed there go out with the next quote.
 During warm-up `ctx.is_history` is true and orders are ignored: runs start flat.
 
+`on_close_request(ctx, reason)` is the owner's **Close positions** button on the run page: close
+what is open at market and go on trading — the run is not stopped and takes its next entry as it
+would after any other exit. The default closes this market's position with the given reason, which
+is enough for a strategy whose whole state is its position. A strategy that keeps state of its own
+(a pair that holds two markets) overrides it to clear that state as well, so it never believes it
+still holds what the exchange no longer has:
+
+```python
+    def on_close_request(self, ctx, reason):
+        self.pair.close(ctx.now_ms, reason, ctx.log)   # both legs, the usual pause after an exit
+        self._act(ctx, ctx.now_ms)
+```
+
+The button appears only for Python strategy runs that are running: a Pine run keeps its own trade
+list, so a close behind its back would be mirrored open again on the next bar.
+
+`ctx.entries_held` is the owner's **Close and hold**: while it is true the run watches prices and
+manages, closes and protects whatever is open, but opens nothing new until **Resume entries**. A
+strategy that decides entries itself should skip them while it is true:
+
+```python
+    def on_quote(self, ctx, quote):
+        if ctx.entries_held:
+            return self.manage_open_position(ctx)   # exits always keep working
+```
+
+The engine refuses an entry anyway while the hold is on (`entries_on_hold` reaches
+`on_order_rejected`), so a strategy that ignores the flag still cannot open; a strategy that keeps
+its own state is better off not deciding an entry at all.
+
 ## Orders (Pine semantics)
 
 | Call | Meaning |
 | --- | --- |
-| `ctx.entry(id, "long"/"short", limit=, stop=, size=1.0, usdc=, oca=, ioc=False)` | Open or reverse. Market without limit/stop; `size` scales the Paper order size; `usdc=2000` sets the amount itself (USDC at the order's price, whatever the account and Order size; Live: Max position, the leverage limit and the exchange's minimum still apply). `ioc=True` (with `limit`): immediate-or-cancel, see below. |
-| `ctx.exit(id, from_entry, limit=, stop=, profit_ticks=, loss_ticks=, profit_percent=, loss_percent=, profit_type="limit", trail_points_ticks=, trail_price=, trail_offset_ticks=, qty_percent=)` | Take-profit / stop-loss / trailing for each trade of the entry, priced from its real average entry and attached the moment it fills. `profit_type="market"`: the take-profit is a trigger like the stop (market order 300 ms after the price reaches it). |
-| `ctx.close(entry_id=None, qty_percent=100)`, `ctx.close_all()` | Close at market. |
+| `ctx.entry(id, "long"/"short", limit=, stop=, size=1.0, usdc=, oca=, ioc=False, reason=)` | Open or reverse. Market without limit/stop; `size` scales the Paper order size; `usdc=2000` sets the amount itself (USDC at the order's price, whatever the account and Order size; Live: Max position, the leverage limit and the exchange's minimum still apply). `ioc=True` (with `limit`): immediate-or-cancel, see below. |
+| `ctx.exit(id, from_entry, limit=, stop=, profit_ticks=, loss_ticks=, profit_percent=, loss_percent=, profit_type="limit", trail_points_ticks=, trail_price=, trail_offset_ticks=, qty_percent=, reason=)` | Take-profit / stop-loss / trailing for each trade of the entry, priced from its real average entry and attached the moment it fills. `profit_type="market"`: the take-profit is a trigger like the stop (market order 300 ms after the price reaches it). |
+| `ctx.close(entry_id=None, qty_percent=100, reason=)`, `ctx.close_all(reason=)` | Close at market. |
 | `ctx.cancel(id)`, `ctx.cancel_all()` | Remove working orders. |
 
 Read-only: `ctx.position`, `ctx.position_avg_price`, `ctx.trades`, `ctx.orders`, `ctx.bars`,
@@ -56,6 +86,13 @@ Read-only: `ctx.position`, `ctx.position_avg_price`, `ctx.trades`, `ctx.orders`,
 `min_quantity`, `min_notional` as Decimal; available from the first live price), `ctx.market`,
 `ctx.venue`, `ctx.now_ms`; `ctx.state` is a dict for your own data; `ctx.log(text)` writes to
 the run journal. Prices may be given as `Decimal` or strings to keep them exact.
+
+`reason=` (up to 120 characters) says why the order is placed, for example
+`ctx.close_all(reason="take-profit, r came back +12.0 bp")`. It is written with every fill the
+order makes, and the run page shows it under Trades by position as the entry and exit reason of
+that position. Without one, an exit is named by the leg that fired (take-profit order, stop-loss
+order, trailing stop), and what the engine does on its own says so itself: an exchange-side stop
+or take-profit executing, the run stopping, a public data gap, a late fill.
 
 `ctx.status(key, title, markets=[...], lines=[...], progress={...})` shows a small panel on the run
 page under Open positions (`title=None` removes it); it goes out with the account snapshot (every

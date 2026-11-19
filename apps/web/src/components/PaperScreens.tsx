@@ -3,6 +3,7 @@ import { runPath } from '../lib/run-paths';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { readPaperDraft, writePaperDraft } from '../lib/editor-draft';
 import { isXyzMarket } from '../lib/stock-hours';
+import { PairLegRoomNotice } from './PairLegRoomNotice';
 import { XyzHoursNotice } from './XyzHoursNotice';
 import { ExchangeLimitsForecast, useExchangeLoad } from './ExchangeLimits';
 import { forecastRun, runLoadPlan } from '../../../../packages/shared/src/exchange-load';
@@ -825,6 +826,7 @@ export function PaperSetupPreview({ source, fromBacktest, fromEditor = fromBackt
             {(!live || liveVenues.includes('Lighter')) && feeField('lighterMakerFeePercent', 'Lighter maker fee')}
             {(!live || liveVenues.includes('Lighter')) && feeField('lighterTakerFeePercent', 'Lighter taker fee')}
           </div>
+          <PairLegRoomNotice settings={draft} />
           {live && runExchanges.map((exchange) => {
             const info = liveFees[exchange];
             return info === undefined ? null : typeof info === 'object'

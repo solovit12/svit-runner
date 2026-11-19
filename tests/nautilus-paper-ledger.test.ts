@@ -181,21 +181,25 @@ describe('Nautilus Paper durable ledger', () => {
     expect(() => ledger.append({ ...base, panels: [{ ...panel, progress: { ...panel.progress, target: 0 } }] })).toThrow();
     expect(() => ledger.append({ ...base, panels: [{ ...panel, script: 'x' }] })).toThrow();
     ledger.append({ ...base, panels: [panel] });
-    const leg = (seq: number, market: 'HYPE' | 'SOL', kind: 'entry' | 'exit', side: 'long' | 'short', pnl: string | null) => ({
+    const leg = (seq: number, market: 'HYPE' | 'SOL', kind: 'entry' | 'exit', side: 'long' | 'short', pnl: string | null,
+      reason?: string) => ({
       ...envelope(detail.id, seq), type: 'fill' as const, venue: 'Lighter' as const, id: `f${seq}`, market, kind,
       side: ((kind === 'entry') === (side === 'long') ? 'buy' : 'sell') as 'buy' | 'sell', positionSide: side,
-      quantity: '1', quote: '100', price: '100', fee: '0', realizedPnl: pnl });
-    ledger.append(leg(2, 'HYPE', 'entry', 'long', null));
-    ledger.append(leg(3, 'SOL', 'entry', 'short', null));
-    ledger.append(leg(4, 'HYPE', 'exit', 'long', '-1.5'));
-    ledger.append(leg(5, 'SOL', 'exit', 'short', '2.25'));
+      quantity: '1', quote: '100', price: '100', fee: '0', realizedPnl: pnl, ...(reason ? { reason } : {}) });
+    // A reason longer than the schema allows is refused, so one strategy cannot flood the journal.
+    expect(() => ledger.append(leg(2, 'HYPE', 'entry', 'long', null, 'x'.repeat(121)))).toThrow();
+    ledger.append(leg(2, 'HYPE', 'entry', 'long', null, 'r -8.3 bp from its 15-min mean'));
+    ledger.append(leg(3, 'SOL', 'entry', 'short', null, 'r -8.3 bp from its 15-min mean'));
+    ledger.append(leg(4, 'HYPE', 'exit', 'long', '-1.5', 'take-profit, r came back +12.0 bp'));
+    ledger.append(leg(5, 'SOL', 'exit', 'short', '2.25', 'take-profit, r came back +12.0 bp'));
     expect(ledger.snapshot()?.panels).toEqual([panel]);
     ledger.close();
     expect(readNautilusPaperSnapshot(detail, directory)!.panels).toEqual([panel]);
     const trades = readPaperExperimentTradesV1({ detail, runtimeDirectory: runs });
     expect(trades.coverage).toBe('durable_journal');
     expect(trades.groups).toHaveLength(1);
-    expect(trades.groups[0]).toMatchObject({ name: 'HYPE/SOL', realizedPnl: 0.75 });
+    expect(trades.groups[0]).toMatchObject({ name: 'HYPE/SOL', realizedPnl: 0.75,
+      openReason: 'r -8.3 bp from its 15-min mean', closeReason: 'take-profit, r came back +12.0 bp' });
     expect(trades.groups[0]!.legs.map((one) => [one.market, one.side, one.realizedPnl])).toEqual([
       ['HYPE', 'long', -1.5], ['SOL', 'short', 2.25]]);
     expect(readPaperExperimentTradeStatsV1({ detail, runtimeDirectory: runs }))

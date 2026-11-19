@@ -5,6 +5,7 @@ import type {
 } from '../../../../packages/shared/src/paper-experiment-contracts';
 import { checkLiveAccount, createLiveAccount, loadLiveAccounts, removeLiveAccount, updateLiveAccount } from '../lib/api';
 import { ExchangeLimitsPanel, useExchangeLoad } from './ExchangeLimits';
+import { opensInNewTab, runPath } from '../lib/run-paths';
 import { InfoTooltip } from './TranslatedText';
 
 function errorText(reason: unknown): string {
@@ -226,7 +227,9 @@ export function LiveAccountsPage({ onOpenRun }: { onOpenRun: (runId: string) => 
             <div><dt>LIVE</dt><dd>{account.enabled ? 'On' : 'Off'}</dd></div>
             <div><dt>Key</dt><dd>{account.keySaved ? (account.keySource === 'server' ? 'Set by the server operator' : 'Saved on this machine') : 'Missing'}</dd></div>
             <div><dt>Run</dt><dd>{account.runId
-              ? <button type="button" className="live-account-run" onClick={() => onOpenRun(account.runId!)}>Open the LIVE run</button>
+              ? <a className="live-account-run" href={runPath(account.runId)}
+                title="Open this run · middle or Cmd/Ctrl click opens it in a new tab"
+                onClick={(event) => { if (opensInNewTab(event)) return; event.preventDefault(); onOpenRun(account.runId!); }}>Open the LIVE run</a>
               : 'Not in a run'}</dd></div>
           </dl>
           <div className="paper-live-settings-actions">

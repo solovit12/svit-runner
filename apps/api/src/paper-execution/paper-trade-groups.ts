@@ -1,3 +1,4 @@
+import { pairsFrom } from '../../../../packages/shared/src/pair-legs.js';
 import type {
   PaperExperimentActivityFill,
   PaperRunTradeStats,
@@ -16,9 +17,23 @@ type LegState = {
   openedMs: number | null; openedAt: string | null; closedAt: string | null;
   open: number; peak: number; entryQty: number; entryValue: number; exitQty: number; exitValue: number;
   pnl: number | null; fees: number; fills: number;
+  openReason: string | null; closeReason: string | null;
 };
 
 const EPS = 1e-12;
+/** Longest reason kept on a position (the ledger already caps a fill's own at 120). */
+const MAX_REASON = 120;
+
+function reasonOf(fill: PaperExperimentActivityFill): string | null {
+  const text = typeof fill.reason === 'string' ? fill.reason.trim().slice(0, MAX_REASON) : '';
+  return text || null;
+}
+
+/** The one reason every leg names, or null when they name none or disagree (then each leg has its own). */
+function shared(legs: readonly PaperTradeLeg[], of: (leg: PaperTradeLeg) => string | null): string | null {
+  const first = of(legs[0]!);
+  return first !== null && legs.every((leg) => of(leg) === first) ? first : null;
+}
 
 function finish(leg: LegState): PaperTradeLeg {
   return {
@@ -26,6 +41,7 @@ function finish(leg: LegState): PaperTradeLeg {
     quantity: leg.peak, entryPrice: leg.entryQty > 0 ? leg.entryValue / leg.entryQty : null,
     exitPrice: leg.exitQty > 0 ? leg.exitValue / leg.exitQty : null, entryValue: leg.entryValue,
     realizedPnl: leg.exitQty > 0 ? leg.pnl : 0, fees: leg.fees, fills: leg.fills,
+    openReason: leg.openReason, closeReason: leg.closeReason,
   };
 }
 
@@ -35,6 +51,8 @@ function finish(leg: LegState): PaperTradeLeg {
  * market yet, and only markets of one pair: the pairs the strategy's panels name (ctx.status markets), else
  * the pairs of its `pairs` parameter ("BRENTOIL/WTI, XAU/XAG"). A market in no pair stays a group of its own.
  */
+export { pairsFrom };
+
 export function groupTrades(fills: readonly PaperExperimentActivityFill[],
   panels: readonly PaperStrategyPanel[] = [], pairsParam?: unknown,
 ): { groups: PaperTradeGroup[]; truncated: boolean; stats: PaperRunTradeStats } {
@@ -49,7 +67,7 @@ export function groupTrades(fills: readonly PaperExperimentActivityFill[],
     if (fill.kind === 'entry' && (!leg || leg.side !== fill.positionSide)) {
       leg = { venue: fill.venue, market: fill.market, side: fill.positionSide, openedMs: Number.isFinite(ms) ? ms : null,
         openedAt: fill.at, closedAt: null, open: 0, peak: 0, entryQty: 0, entryValue: 0, exitQty: 0, exitValue: 0,
-        pnl: 0, fees: 0, fills: 0 };
+        pnl: 0, fees: 0, fills: 0, openReason: null, closeReason: null };
       legs.push(leg);
       open.set(key, leg);
     }
@@ -59,7 +77,9 @@ export function groupTrades(fills: readonly PaperExperimentActivityFill[],
     if (fill.kind === 'entry') {
       leg.open += quantity; leg.peak = Math.max(leg.peak, leg.open);
       leg.entryQty += quantity; leg.entryValue += value;
+      leg.openReason = leg.openReason ?? reasonOf(fill);   // the first entry fill that names one
     } else {
+      leg.closeReason = reasonOf(fill) ?? leg.closeReason; // the last exit fill that names one
       leg.open -= quantity;
       leg.exitQty += quantity; leg.exitValue += value;
       leg.pnl = leg.pnl === null || fill.realizedPnl === null ? null : leg.pnl + Number(fill.realizedPnl);
@@ -94,7 +114,10 @@ export function groupTrades(fills: readonly PaperExperimentActivityFill[],
       name: order.map((leg) => leg.market).join('/'),
       openedAt: first.openedAt,
       closedAt: closed ? order.map((leg) => leg.closedAt ?? '').sort().at(-1) ?? null : null,
-      realizedPnl: pnl, fees: order.reduce((sum, leg) => sum + leg.fees, 0), legs: order,
+      realizedPnl: pnl, fees: order.reduce((sum, leg) => sum + leg.fees, 0),
+      openReason: shared(order, (leg) => leg.openReason),
+      closeReason: closed ? shared(order, (leg) => leg.closeReason) : null,
+      legs: order,
     };
   }).reverse();
   return { groups: shaped.slice(0, MAX_TRADE_GROUPS), truncated: shaped.length > MAX_TRADE_GROUPS, stats: tradeStats(shaped) };
@@ -117,9 +140,3 @@ export function tradeStats(groups: readonly PaperTradeGroup[]): PaperRunTradeSta
   return { closed, wins, grossProfit, grossLoss, partial };
 }
 
-/** "BRENTOIL/WTI, XAU/XAG" -> [["BRENTOIL", "WTI"], ["XAU", "XAG"]]; anything else -> []. */
-export function pairsFrom(value: unknown): string[][] {
-  if (typeof value !== 'string' || value.length > 2_000) return [];
-  return value.split(/[,;\n]/).map((item) => item.trim().split('/').map((market) => market.trim()))
-    .filter((pair) => pair.length === 2 && pair.every((market) => /^[A-Za-z0-9:._-]{1,40}$/.test(market)));
-}
